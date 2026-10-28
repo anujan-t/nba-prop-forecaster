@@ -1,4 +1,5 @@
-import { modelNames, statNames } from './api';
+import { modelNames, odds, statNames } from './api';
+import type { ChatSlip } from './assistant-types';
 import type { ParlayLegRequest, ParlayPair, ParlayResult, Side } from './parlay-types';
 import type { AppliedForecast, Model, Stat } from './types';
 
@@ -57,6 +58,24 @@ export function parseBookOdds(text: string): { value: number | null; error: stri
   const value = Number(cleaned);
   if (Math.abs(value) < 100 || Math.abs(value) > 10000) return { value: null, error: 'American odds must be from −10000 to −100 or +100 to +10000.' };
   return { value, error: '' };
+}
+
+/** Odds as typed in the book-odds field ("+450", "-120"), or "" when there is no price. */
+export function bookOddsText(value: number | null): string {
+  return value === null ? '' : odds(value);
+}
+
+/** Whole-number American odds the parlay endpoint accepts, or null. */
+export function validBookOdds(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && Math.abs(value) >= 100 && Math.abs(value) <= 10000 ? value : null;
+}
+
+/** The slip as the assistant and the bet tracker receive it. */
+export function chatSlip(legs: SlipLeg[], bookOdds: string): ChatSlip {
+  return {
+    legs: legs.map(leg => ({ request: leg.request, label: leg.label })),
+    book_odds: parseBookOdds(bookOdds).value,
+  };
 }
 
 export function americanLabel(value: number): string {
@@ -148,7 +167,7 @@ function nullableNumber(value: unknown, integer = false): number | null | undefi
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!integer || Number.isInteger(value)) ? value : undefined;
 }
 
-function sanitizeLeg(value: unknown): SlipLeg | null {
+export function sanitizeLeg(value: unknown): SlipLeg | null {
   if (!isRecord(value) || !isRecord(value.request) || !isRecord(value.label)) return null;
   const request = value.request;
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 120 ? item : null;
@@ -176,19 +195,25 @@ function sanitizeLeg(value: unknown): SlipLeg | null {
   };
 }
 
+/** Sanitizes each leg, keeps the first leg for each player + stat and caps the slip at MAX_LEGS. */
+export function sanitizeLegs(items: unknown[]): { legs: SlipLeg[]; dropped: number } {
+  const legs: SlipLeg[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const leg = sanitizeLeg(item);
+    if (!leg || seen.has(legKey(leg.request)) || legs.length >= MAX_LEGS) continue;
+    seen.add(legKey(leg.request));
+    legs.push(leg);
+  }
+  return { legs, dropped: items.length - legs.length };
+}
+
 export function parseSlip(raw: string | null): SlipState {
   if (!raw) return emptySlip;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.legs)) return emptySlip;
-    const legs: SlipLeg[] = [];
-    const seen = new Set<string>();
-    for (const item of parsed.legs) {
-      const leg = sanitizeLeg(item);
-      if (!leg || seen.has(legKey(leg.request)) || legs.length >= MAX_LEGS) continue;
-      seen.add(legKey(leg.request));
-      legs.push(leg);
-    }
+    const { legs } = sanitizeLegs(parsed.legs);
     return { legs, bookOdds: typeof parsed.bookOdds === 'string' ? parsed.bookOdds.slice(0, 12) : '' };
   } catch {
     return emptySlip;

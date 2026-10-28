@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock, Thread
+import time
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -20,6 +22,9 @@ from .engine import american_probability, backtest, forecast
 from .nba import NBAUnavailableError, NoGamesError, import_game_logs, normalize_name, search_players, static_player_ids
 from .league import current_season, fetch_career, fetch_profile, fetch_roster, previous_season, summarize_history
 from .parlay import MAX_LEGS, LegNotFound, price_parlay
+from .assistant import Coach
+from .learning import Learning
+from .llm import LLMClient
 
 ROOT = Path(__file__).resolve().parent.parent
 Stat = Literal["points", "rebounds", "assists", "steals", "blocks"]
@@ -143,6 +148,88 @@ class ParlayRequest(StrictModel):
         return value if value is None else ForecastRequest.validate_odds(value)
 
 
+class LegLabel(StrictModel):
+    player: str = Field(min_length=1, max_length=120)
+    team: str = Field(default="", max_length=60)
+
+
+class SlipLeg(StrictModel):
+    request: ParlayLeg
+    label: LegLabel
+
+
+class Slip(StrictModel):
+    legs: list[SlipLeg] = Field(default_factory=list, max_length=MAX_LEGS)
+    book_odds: int | None = None
+
+    @field_validator("book_odds")
+    @classmethod
+    def validate_odds(cls, value: int | None) -> int | None:
+        return value if value is None else ForecastRequest.validate_odds(value)
+
+    @field_validator("legs")
+    @classmethod
+    def unique_legs(cls, legs: list[SlipLeg]) -> list[SlipLeg]:
+        keys = [(leg.request.player_id, leg.request.stat) for leg in legs]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Each player and stat may appear only once in the slip.")
+        return legs
+
+
+class Focus(StrictModel):
+    dataset_id: str = Field(min_length=1, max_length=80)
+    player_id: str = Field(min_length=1, max_length=80)
+    player: str = Field(min_length=1, max_length=120)
+    team: str = Field(default="", max_length=60)
+    stat: Stat
+    line: float = Field(ge=0, le=200)
+    model: Model = "auto"
+    lookback: int = Field(default=30, ge=10, le=82)
+    expected_minutes: float | None = Field(default=None, ge=1, le=60)
+    rest_days: int | None = Field(default=None, ge=0, le=30)
+    opponent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,5}$")
+    use_context: bool = True
+
+    @field_validator("line")
+    @classmethod
+    def validate_line(cls, value: float) -> float:
+        return ForecastRequest.validate_line(value)
+
+
+class ChatRequest(StrictModel):
+    message: str = Field(min_length=1, max_length=1000)
+    conversation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    slip: Slip = Field(default_factory=Slip)
+    focus: Focus | None = None
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        if not value.strip() or any(ord(char) < 32 and char not in "\n\t" for char in value):
+            raise ValueError("Write a message without control characters.")
+        return value
+
+
+class FeedbackRequest(StrictModel):
+    turn_id: str = Field(pattern=r"^[A-Za-z0-9_-]{6,40}$")
+    rating: Literal[1, -1]
+    note: str | None = Field(default=None, max_length=500)
+
+
+class TrackBetRequest(StrictModel):
+    slip: Slip
+    stake: float | None = Field(default=None, gt=0, le=1_000_000)
+    event_date: date | None = None
+    note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("slip")
+    @classmethod
+    def has_legs(cls, slip: Slip) -> Slip:
+        if not slip.legs:
+            raise ValueError("Add at least one leg before tracking a bet.")
+        return slip
+
+
 class LineRequest(StrictModel):
     dataset_id: str = Field(min_length=1, max_length=80)
     player_id: str = Field(min_length=1, max_length=80)
@@ -172,8 +259,8 @@ class LineRequest(StrictModel):
         return value
 
 
-def create_app(data_dir: Path | None = None) -> FastAPI:
-    app = FastAPI(title="Courtside / NBA Prop Forecaster", version="1.2.0")
+def create_app(data_dir: Path | None = None, background: bool = False) -> FastAPI:
+    app = FastAPI(title="Courtside / NBA Prop Forecaster", version="1.3.0")
     store = Store(data_dir or Path(os.environ.get("NBA_DATA_DIR", ROOT / "runtime")))
     app.state.store = store
     nba_lock = RLock()
@@ -216,14 +303,56 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def current_roster(refresh: bool = False):
         return cached_provider("roster:" + current_season(), fetch_roster, refresh)
 
+    def roster_or_saved() -> dict:
+        """Roster membership for lookups: the last saved roster is acceptable if NBA Stats is briefly unreachable."""
+        try:
+            return current_roster()
+        except NBAUnavailableError:
+            saved = store.resource("roster:" + current_season())
+            if saved is None:
+                raise
+            return saved
+
     def current_player(player_id: str):
         if not player_id.isdigit() or len(player_id) > 10:
             raise HTTPException(422, "Use a numeric NBA player ID.")
-        roster = current_roster()
+        roster = roster_or_saved()
         player = next((player for player in roster["players"] if player["id"] == player_id), None)
         if player is None:
             raise HTTPException(404, "Player is not listed on NBA's current roster. Refresh the league directory if a recent signing is missing.")
         return player
+
+    learning = Learning(store, history=lambda player_id, refresh: history_frame(player_id, refresh))
+    app.state.learning = learning
+    try:
+        language_model = LLMClient.from_env()
+    except ValueError as exc:
+        language_model = None
+        logging.getLogger("courtside").warning("Language model disabled: %s", exc)
+    coach = Coach(lambda: roster_or_saved()["players"], lambda player_id, refresh: history_frame(player_id, refresh),
+                  store.load, learning=learning, llm=language_model)
+    app.state.coach = coach
+    retrain_lock = Lock()
+    last_retrain = {"at": float("-inf")}
+
+    def retrain_now() -> None:
+        with retrain_lock:
+            last_retrain["at"] = time.monotonic()
+            try:
+                learning.retrain()
+            except Exception:  # a failed background refit must never take the app down
+                logging.getLogger("courtside").exception("Calibration retrain failed.")
+
+    def schedule_retrain(force: bool = False) -> None:
+        """Background refit when new games or graded bets arrive (at most every 10 minutes)."""
+        if not background or retrain_lock.locked() or (not force and time.monotonic() - last_retrain["at"] < 600):
+            return
+        Thread(target=retrain_now, name="courtside-retrain", daemon=True).start()
+
+    if background:
+        trained = learning.calibration_status().get("trained_at")
+        if not trained or datetime.now(timezone.utc) - datetime.fromisoformat(trained.replace("Z", "+00:00")) > timedelta(hours=6):
+            schedule_retrain(force=True)
 
     @app.get("/api/health")
     def health():
@@ -257,11 +386,77 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/parlay")
     def run_parlay(body: ParlayRequest):
         try:
-            return price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load)
+            return price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load, calibrator=learning)
         except LegNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/assistant/status")
+    def assistant_status():
+        return coach.status()
+
+    @app.post("/api/assistant/chat")
+    def assistant_chat(body: ChatRequest):
+        slip = body.slip.model_dump()
+        try:
+            return coach.chat(body.message, body.conversation_id, slip, body.focus.model_dump() if body.focus else None)
+        except HTTPException:
+            raise
+        except NBAUnavailableError as exc:
+            raise HTTPException(502, f"{exc} Your slip is unchanged.") from exc
+
+    @app.post("/api/assistant/feedback")
+    def assistant_feedback(body: FeedbackRequest):
+        try:
+            return learning.feedback(body.turn_id, body.rating, body.note)
+        except KeyError as exc:
+            raise HTTPException(404, "That reply was not found; feedback was not saved.") from exc
+
+    @app.get("/api/ledger")
+    def ledger():
+        return {"bets": learning.bets(), "record": learning.track_record()}
+
+    @app.post("/api/ledger", status_code=201)
+    def track_bet(body: TrackBetRequest):
+        slip = body.slip.model_dump()
+        try:
+            priced = price_parlay([leg["request"] for leg in slip["legs"]], slip["book_odds"], store.load)
+            return learning.track(slip["legs"], slip["book_odds"], body.stake, body.event_date, priced, body.note)
+        except LegNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/ledger/settle")
+    def settle_bets():
+        result = learning.settle()
+        if result["settled_legs"]:
+            schedule_retrain(force=True)
+        return result
+
+    @app.delete("/api/ledger/{bet_id}", status_code=204)
+    def delete_bet(bet_id: str):
+        if not learning.delete_bet(bet_id):
+            raise HTTPException(404, "Tracked bet not found.")
+        return Response(status_code=204)
+
+    @app.get("/api/learning")
+    def learning_status():
+        return learning.status()
+
+    @app.post("/api/learning/retrain")
+    def retrain():
+        if retrain_lock.locked():
+            return learning.status()
+        retrain_now()
+        return learning.status()
+
+    @app.delete("/api/learning/aliases/{phrase}", status_code=204)
+    def forget_alias(phrase: str):
+        if not learning.forget_alias(phrase):
+            raise HTTPException(404, "That nickname is not in memory.")
+        return Response(status_code=204)
 
     @app.get("/api/datasets/template")
     def template():
@@ -328,68 +523,84 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except NBAUnavailableError as exc:
             raise HTTPException(502, str(exc)) from exc
 
+    def player_history(body: PlayerHistoryRequest) -> dict:
+        """Recent or single-season game logs for one current player, cached for six hours (raises provider errors)."""
+        player = current_player(body.player_id)
+        latest = current_season() if body.window == "recent" else body.window
+        seasons = [previous_season(latest), latest] if body.window == "recent" else [latest]
+        query = {"player_ids": [body.player_id], "season": latest, "season_type": body.season_type}
+        if body.window == "recent":
+            query["include_previous"] = True
+        empty_key = "empty-history:" + nba_cache_id(query)
+        with nba_lock:
+            cached = store.cached_nba(query)
+            if cached is not None and cached.get("details_version") == 1 and not body.refresh and nba_cache_fresh(cached):
+                frame, info = store.load(cached["id"])
+                cache_hit = True
+                warnings = info.get("history_warnings", [])
+                queried = info["queried_seasons"]
+            else:
+                no_games = store.resource(empty_key)
+                if no_games is not None and not body.refresh and nba_cache_fresh(no_games):
+                    return {**no_games, "cache_hit": True}
+                frames, warnings, queried = [], [], []
+                for season in seasons:
+                    if player.get("from_year") is not None and int(season[:4]) < player["from_year"]:
+                        warnings.append(f"{season} is before this player's listed NBA debut; no earlier NBA results are assumed.")
+                        continue
+                    queried.append(season)
+                    try:
+                        frames.append(import_game_logs([body.player_id], season, body.season_type, player_names={body.player_id: player["name"]}))
+                    except NoGamesError as exc:
+                        warnings.append(str(exc))
+                if not frames:
+                    return store.save_resource(empty_key, {
+                        "player_id": body.player_id, "status": "empty", "history": None, "summary": None,
+                        "splits": [], "games": [], "queried_seasons": queried, "cache_hit": False,
+                        "warnings": [*warnings, "No completed NBA games with positive minutes in this window. The player remains accessible; no forecast is fabricated."],
+                    })
+                frame = validate_frame(pd.concat(frames, ignore_index=True))
+                if len(frame) < 10:
+                    warnings.append(f"Only {len(frame)} completed games are available. Profile and game details are shown, but a forecast needs at least 10.")
+                if len(queried) > 1:
+                    warnings.append("Recent history pools the current and previous NBA seasons; these are not current-season-only averages. Season-specific splits are shown separately.")
+                info = store.save(
+                    frame, f"{player['name']} / {body.window if body.window != 'recent' else 'Recent NBA history'} / {body.season_type}",
+                    "nba_api", nba_query=query,
+                    attributes={"details_version": 1, "queried_seasons": queried, "history_warnings": warnings},
+                )
+                with store.connect() as db:
+                    db.execute("DELETE FROM provider_cache WHERE key = ?", (empty_key,))
+                cache_hit = False
+                schedule_retrain()
+            summary, splits = summarize_history(frame)
+            return {
+                "player_id": body.player_id, "status": "ready" if len(frame) >= 10 else "limited",
+                "history": info, "summary": summary, "splits": splits,
+                "games": json.loads(frame.to_json(orient="records", force_ascii=False)),
+                "queried_seasons": queried, "warnings": warnings, "cache_hit": cache_hit,
+                "fetched_at": info["fetched_at"],
+            }
+
     @app.post("/api/nba/player-history")
     def nba_player_history(body: PlayerHistoryRequest):
         try:
-            player = current_player(body.player_id)
-            latest = current_season() if body.window == "recent" else body.window
-            seasons = [previous_season(latest), latest] if body.window == "recent" else [latest]
-            query = {"player_ids": [body.player_id], "season": latest, "season_type": body.season_type}
-            if body.window == "recent":
-                query["include_previous"] = True
-            empty_key = "empty-history:" + nba_cache_id(query)
-            with nba_lock:
-                cached = store.cached_nba(query)
-                if cached is not None and cached.get("details_version") == 1 and not body.refresh and nba_cache_fresh(cached):
-                    frame, info = store.load(cached["id"])
-                    cache_hit = True
-                    warnings = info.get("history_warnings", [])
-                    queried = info["queried_seasons"]
-                else:
-                    no_games = store.resource(empty_key)
-                    if no_games is not None and not body.refresh and nba_cache_fresh(no_games):
-                        return {**no_games, "cache_hit": True}
-                    frames, warnings, queried = [], [], []
-                    for season in seasons:
-                        if player.get("from_year") is not None and int(season[:4]) < player["from_year"]:
-                            warnings.append(f"{season} is before this player's listed NBA debut; no earlier NBA results are assumed.")
-                            continue
-                        queried.append(season)
-                        try:
-                            frames.append(import_game_logs([body.player_id], season, body.season_type, player_names={body.player_id: player["name"]}))
-                        except NoGamesError as exc:
-                            warnings.append(str(exc))
-                    if not frames:
-                        return store.save_resource(empty_key, {
-                            "player_id": body.player_id, "status": "empty", "history": None, "summary": None,
-                            "splits": [], "games": [], "queried_seasons": queried, "cache_hit": False,
-                            "warnings": [*warnings, "No completed NBA games with positive minutes in this window. The player remains accessible; no forecast is fabricated."],
-                        })
-                    frame = validate_frame(pd.concat(frames, ignore_index=True))
-                    if len(frame) < 10:
-                        warnings.append(f"Only {len(frame)} completed games are available. Profile and game details are shown, but a forecast needs at least 10.")
-                    if len(queried) > 1:
-                        warnings.append("Recent history pools the current and previous NBA seasons; these are not current-season-only averages. Season-specific splits are shown separately.")
-                    info = store.save(
-                        frame, f"{player['name']} / {body.window if body.window != 'recent' else 'Recent NBA history'} / {body.season_type}",
-                        "nba_api", nba_query=query,
-                        attributes={"details_version": 1, "queried_seasons": queried, "history_warnings": warnings},
-                    )
-                    with store.connect() as db:
-                        db.execute("DELETE FROM provider_cache WHERE key = ?", (empty_key,))
-                    cache_hit = False
-                summary, splits = summarize_history(frame)
-                return {
-                    "player_id": body.player_id, "status": "ready" if len(frame) >= 10 else "limited",
-                    "history": info, "summary": summary, "splits": splits,
-                    "games": json.loads(frame.to_json(orient="records", force_ascii=False)),
-                    "queried_seasons": queried, "warnings": warnings, "cache_hit": cache_hit,
-                    "fetched_at": info["fetched_at"],
-                }
+            return player_history(body)
         except NBAUnavailableError as exc:
             raise HTTPException(502, f"{exc} Previously saved history is unchanged.") from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    def history_frame(player_id: str, refresh: bool = False) -> tuple[str, pd.DataFrame, dict]:
+        """(dataset_id, frame, info) for a player's recent regular-season logs, for the coach and the bet grader."""
+        try:
+            payload = player_history(PlayerHistoryRequest(player_id=player_id, refresh=refresh))
+        except HTTPException as exc:
+            raise ValueError(str(exc.detail)) from exc
+        if payload.get("history") is None:
+            raise ValueError("No completed NBA games in the recent window.")
+        frame, info = store.load(payload["history"]["id"])
+        return payload["history"]["id"], frame, info
 
     @app.post("/api/nba/history")
     @app.post("/api/datasets/nba", status_code=201, deprecated=True)
@@ -451,4 +662,4 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+app = create_app(background=os.environ.get("COURTSIDE_BACKGROUND", "1") != "0")

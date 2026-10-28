@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, isAbort, messageOf } from './api';
-import { MAX_LEGS, SLIP_STORAGE_KEY, legKey, loadSlip, parseBookOdds, parseParlayError, parseSlip, sameLeg, saveSlip } from './parlay';
+import { MAX_LEGS, SLIP_STORAGE_KEY, bookOddsText, legKey, loadSlip, parseBookOdds, parseParlayError, parseSlip, sameLeg, sanitizeLegs, saveSlip, validBookOdds } from './parlay';
 import type { LegLabel, ParlayError, SlipLeg } from './parlay';
 import type { ParlayLeg, ParlayLegRequest, ParlayRequest, ParlayResult, Side } from './parlay-types';
 
 export interface ParlayComputation { data: ParlayResult; request: ParlayRequest; key: string }
 export type UpsertOutcome = 'added' | 'replaced' | 'unchanged' | 'full';
+/** What happened when a whole slip from elsewhere (the assistant) replaced the current one. */
+export interface ReplaceOutcome { legs: SlipLeg[]; dropped: number; oddsDropped: boolean }
 
 export interface ParlayState {
   legs: SlipLeg[];
@@ -19,6 +21,7 @@ export interface ParlayState {
   error: ParlayError | null;
   retry: () => void;
   upsertLeg: (request: ParlayLegRequest, label: LegLabel) => UpsertOutcome;
+  replaceSlip: (slip: { legs: unknown[]; book_odds: unknown }) => ReplaceOutcome;
   setSide: (index: number, side: Side) => void;
   setLine: (index: number, line: number) => void;
   removeLeg: (index: number) => void;
@@ -108,6 +111,18 @@ export function useParlay(): ParlayState {
     setLegs(current => current.map((leg, position) => position === index ? { ...leg, request: { ...leg.request, ...patch } } : leg));
   }, []);
 
+  /** Replaces the whole slip with the same rules as a stored slip; the debounced computation then runs as usual. */
+  const replaceSlip = useCallback((slip: { legs: unknown[]; book_odds: unknown }): ReplaceOutcome => {
+    const { legs: next, dropped } = sanitizeLegs(Array.isArray(slip.legs) ? slip.legs : []);
+    const price = validBookOdds(slip.book_odds);
+    setLegs(next);
+    setBookOdds(current => {
+      const parsed = parseBookOdds(current);
+      return !parsed.error && parsed.value === price ? current : bookOddsText(price);
+    });
+    return { legs: next, dropped, oddsDropped: slip.book_odds != null && price === null };
+  }, []);
+
   return {
     legs,
     full: legs.length >= MAX_LEGS,
@@ -120,6 +135,7 @@ export function useParlay(): ParlayState {
     error,
     retry: useCallback(() => setAttempt(value => value + 1), []),
     upsertLeg,
+    replaceSlip,
     setSide: useCallback((index: number, side: Side) => patchLeg(index, { side }), [patchLeg]),
     setLine: useCallback((index: number, line: number) => patchLeg(index, { line }), [patchLeg]),
     removeLeg: useCallback((index: number) => setLegs(current => current.filter((_, position) => position !== index)), []),

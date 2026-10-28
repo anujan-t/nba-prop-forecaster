@@ -79,11 +79,32 @@ def leg_label(number: int, name: str, stat: str) -> str:
     return f"Leg {number} ({name} {stat})"
 
 
+def calibrated(priced: list[dict], oriented: np.ndarray, calibrator) -> dict | None:
+    """Recalibrates each leg's chance of settling over (when the learning loop has an active map) and re-joins them."""
+    if calibrator is None:
+        return None
+    adjusted = []
+    for leg in priced:
+        loss = max(0.0, 1 - leg["probability"] - leg["push"])
+        settled = leg["probability"] + loss
+        if settled <= 1e-12:
+            return None
+        over = leg["probability"] / settled if leg["side"] == "over" else loss / settled
+        mapped = calibrator.calibrate_over(over, leg["stat"])
+        if mapped is None:
+            return None
+        adjusted.append(float((mapped if leg["side"] == "over" else 1 - mapped) * settled))
+    status = calibrator.calibration_status()
+    return {"probability": orthant(adjusted, oriented), "legs": adjusted, "samples": int(status.get("samples") or 0),
+            "note": f"Each leg recalibrated from {int(status.get('samples') or 0):,} graded predictions, then joined with the same correlations."}
+
+
 def won(values: pd.Series, line: float, side: str) -> pd.Series:
     return values > line if side == "over" else values < line
 
 
-def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], tuple[pd.DataFrame, dict]]) -> dict:
+def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], tuple[pd.DataFrame, dict]],
+                 calibrator=None) -> dict:
     if not 1 <= len(legs) <= MAX_LEGS:
         raise ValueError(f"A parlay needs 1 to {MAX_LEGS} legs.")
     if book_odds is not None:
@@ -220,6 +241,7 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
         implied = american_probability(book_odds)
         book = {"odds": book_odds, "implied": implied, "edge": probability - implied,
                 "expected_roi": probability * profit_per_unit(book_odds) - (1 - probability)}
+    calibration = calibrated(priced, oriented, calibrator)
 
     if any(pair["basis"] == "independent" for pair in pairs):
         warnings.append("Legs for players on different teams are treated as independent. If those players meet in the same game, "
@@ -236,6 +258,7 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
         "legs": priced, "pairs": pairs, "probability": probability, "independent_probability": independent,
         "correlation_lift": probability / independent if independent > 0 else None,
         "no_loss_probability": no_loss, "fair_odds": fair_odds(probability), "book": book, "history": history,
+        "calibration": calibration,
         "method": ("Each leg uses the same model as the Forecast lab. Legs for the same player, or for current teammates, are linked "
                    "with a Gaussian copula: rank correlations from shared recent games are converted to the latent scale "
                    "(2·sin(πρ/6)) and shrunk toward zero by n/(n+10). Legs for players on different teams are independent. "

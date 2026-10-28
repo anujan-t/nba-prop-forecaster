@@ -81,6 +81,12 @@ export interface ParlayResult {
     expected_roi: number; // expected profit per 1 unit staked; pushes counted as losses
   };
   history: ParlayGroupHistory[];
+  calibration: null | {
+    probability: number; // joint probability with each leg recalibrated by the learning loop (same correlations)
+    legs: number[]; // recalibrated leg probabilities, in leg order
+    samples: number; // graded predictions behind the calibration
+    note: string;
+  }; // null until calibration is active
   method: string; // short plain-English description of the calculation
   warnings: string[]; // de-duplicated warnings for the whole slip
   computed_at: string; // ISO timestamp

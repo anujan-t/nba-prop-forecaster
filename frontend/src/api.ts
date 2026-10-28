@@ -58,6 +58,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new Error(typeof body === 'object' && body !== null && 'detail' in body
       ? detailMessage(body.detail) : `The server returned HTTP ${response.status}. Please try again.`);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 export function isAbort(error: unknown): boolean {
@@ -116,6 +117,12 @@ export function tomorrow(): string {
   const date = new Date();
   date.setDate(date.getDate() + 1);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+/** Today's date in US Eastern time, the NBA's game-date convention, as YYYY-MM-DD. */
+export function todayEastern(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 export function downloadJson(value: unknown, filename: string): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }));

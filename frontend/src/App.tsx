@@ -1,21 +1,30 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ArrowUpRight, BookOpen, ChartNoAxesCombined, Database, FlaskConical, Layers, Moon, PanelTop, Sun, UserRound } from 'lucide-react';
-import { api, defaultForm, formFromRequest, historySyncLabel, isAbort, messageOf, requestFromForm, sourceLabel, validateOdds } from './api';
+import { ArrowUpRight, BookOpen, ChartNoAxesCombined, ClipboardCheck, Database, FlaskConical, Layers, Moon, PanelTop, Sun, UserRound } from 'lucide-react';
+import { api, dateLabel, defaultForm, formFromRequest, historySyncLabel, isAbort, messageOf, requestFromForm, sourceLabel, validateOdds } from './api';
+import type { ChatFocus, TrackedBet } from './assistant-types';
+import { slipHash } from './chat';
+import { ChatLauncher, ChatPanel } from './ChatPanel';
 import { Ball, CourtArt, ErrorNotice, Jersey } from './components';
 import CourtNav from './CourtNav';
 import type { NavItem } from './CourtNav';
 import DataWorkspace from './DataWorkspace';
 import ForecastPanel from './ForecastPanel';
 import LeagueSelector from './LeagueSelector';
+import { units } from './ledger';
 import PlayerIntelligence from './PlayerIntelligence';
 import LineNotebook from './LineNotebook';
 import Methodology from './Methodology';
 import { launchBall } from './motion';
-import { MAX_LEGS, legFromForecast, sideNames, statLabel } from './parlay';
+import { MAX_LEGS, bookOddsText, chatSlip, legFromForecast, sideNames, statLabel, validBookOdds } from './parlay';
 import type { Side } from './parlay-types';
 import { SlipButton, SlipDrawer } from './ParlaySlip';
 import ParlayView from './ParlayView';
+import { Toast } from './TrackBet';
+import type { ToastData } from './TrackBet';
+import TrackRecord from './TrackRecord';
+import { useChat } from './useChat';
+import type { SlipApplication } from './useChat';
 import { useParlay } from './useParlay';
 import ValidationPanel from './ValidationPanel';
 import { usePlayerResource } from './usePlayerResource';
@@ -23,26 +32,37 @@ import type { AppliedForecast, Dataset, Forecast, ForecastForm, ForecastRequest,
 import type { LeagueRoster, PlayerCareer, PlayerHistory, PlayerProfile } from './league-types';
 
 type Theme = 'light' | 'dark';
+type Drawer = 'slip' | 'chat' | null;
 const themeStorageKey = 'courtside.theme';
 
 const views: (NavItem & { number: string; eyebrow: string; title: string; description: string })[] = [
   { id: 'forecast', label: 'Forecast lab', icon: ChartNoAxesCombined, number: '01', eyebrow: 'EVERY CURRENT NBA PLAYER', title: 'Every line has a story.', description: 'The whole league. Real game history. Your assumptions, kept in view.' },
   { id: 'parlay', label: 'Parlay', icon: Layers, number: '02', eyebrow: 'STACK THE LEGS', title: 'Every leg has to land.', description: 'Combine props into one parlay and see the chance that all of them hit, with same-player and teammate links built in.' },
-  { id: 'player', label: 'Player intel', icon: UserRound, number: '03', eyebrow: 'THE PLAYER BEHIND THE NUMBERS', title: 'Know the whole picture.', description: 'Current profiles, shooting, recent form, game logs and career history. No sample-player ceiling.' },
-  { id: 'validation', label: 'Model validation', icon: FlaskConical, number: '04', eyebrow: 'PUT IT TO THE TEST', title: 'Evidence over intuition.', description: 'Out-of-sample evaluation. Honest baselines. No victory laps on training data.' },
-  { id: 'notebook', label: 'Market notebook', icon: BookOpen, number: '05', eyebrow: 'FOLLOW THE QUESTION', title: 'Watch the line, not the noise.', description: 'A deliberate record of manual market snapshots, one game and one book at a time.' },
-  { id: 'data', label: 'NBA history', icon: Database, number: '06', eyebrow: 'DIRECT FROM NBA.COM', title: 'Straight from the source.', description: 'Saved histories are your research cache, not a limit on which players you can access.' },
-  { id: 'methodology', label: 'Methodology', icon: PanelTop, number: '07', eyebrow: 'OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, and the things this model cannot tell you.' },
+  { id: 'record', label: 'Track record', icon: ClipboardCheck, number: '03', eyebrow: 'KEEP SCORE', title: 'The scoreboard settles it.', description: 'Track the parlays you research, grade them against final box scores, and see whether the model is earning its keep.' },
+  { id: 'player', label: 'Player intel', icon: UserRound, number: '04', eyebrow: 'THE PLAYER BEHIND THE NUMBERS', title: 'Know the whole picture.', description: 'Current profiles, shooting, recent form, game logs and career history. No sample-player ceiling.' },
+  { id: 'validation', label: 'Model validation', icon: FlaskConical, number: '05', eyebrow: 'PUT IT TO THE TEST', title: 'Evidence over intuition.', description: 'Out-of-sample evaluation. Honest baselines. No victory laps on training data.' },
+  { id: 'notebook', label: 'Market notebook', icon: BookOpen, number: '06', eyebrow: 'FOLLOW THE QUESTION', title: 'Watch the line, not the noise.', description: 'A deliberate record of manual market snapshots, one game and one book at a time.' },
+  { id: 'data', label: 'NBA history', icon: Database, number: '07', eyebrow: 'DIRECT FROM NBA.COM', title: 'Straight from the source.', description: 'Saved histories are your research cache, not a limit on which players you can access.' },
+  { id: 'methodology', label: 'Methodology', icon: PanelTop, number: '08', eyebrow: 'OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, and the things this model cannot tell you.' },
 ];
 
 export default function App() {
   const [view, setView] = useState<View>('forecast');
   const [theme, setTheme] = useState<Theme>(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
   const parlay = useParlay();
-  const [slipOpen, setSlipOpen] = useState(false);
+  const [drawer, setDrawer] = useState<Drawer>(null);
+  const slipOpen = drawer === 'slip';
+  const chatOpen = drawer === 'chat';
+  const drawerRef = useRef<Drawer>(drawer);
+  drawerRef.current = drawer;
+  const previousDrawer = useRef<Drawer>(null);
   const [bounce, setBounce] = useState(0);
+  const [chatBounce, setChatBounce] = useState(0);
+  const [chatUnread, setChatUnread] = useState(false);
+  const [ledgerVersion, setLedgerVersion] = useState(0);
+  const [toast, setToast] = useState<ToastData | null>(null);
   const [announcement, setAnnouncement] = useState('');
-  const focusAfterClose = useRef<'fab' | 'none' | null>(null);
+  const focusAfterClose = useRef<'fab' | 'chat' | 'none' | null>(null);
   const [mode, setMode] = useState<'league' | 'saved'>('league');
   const [roster, setRoster] = useState<LeagueRoster | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
@@ -197,11 +217,14 @@ export default function App() {
     if (color) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', color);
   }, [theme]);
   useEffect(() => {
-    if (slipOpen) return;
+    const previous = previousDrawer.current;
+    previousDrawer.current = drawer;
+    if (drawer !== null || previous === null) return;
     const target = focusAfterClose.current;
     focusAfterClose.current = null;
     if (target === 'fab') document.getElementById('parlay-slip-button')?.focus();
-  }, [slipOpen]);
+    else if (target === 'chat') document.getElementById('chat-launcher')?.focus();
+  }, [drawer]);
 
   function navigate(next: View) {
     if (next === 'player' && mode === 'saved') {
@@ -225,16 +248,29 @@ export default function App() {
   function announce(text: string) {
     setAnnouncement(current => current === text ? `${text}\u00a0` : text);
   }
-  const openSlip = useCallback(() => setSlipOpen(true), []);
+  const openSlip = useCallback(() => setDrawer('slip'), []);
   const closeSlip = useCallback(() => {
     focusAfterClose.current ??= 'fab';
-    setSlipOpen(false);
+    setDrawer(current => current === 'slip' ? null : current);
   }, []);
-  function viewParlayFromSlip() {
+  const openChat = useCallback(() => { setChatUnread(false); setDrawer('chat'); }, []);
+  const closeChat = useCallback(() => {
+    focusAfterClose.current ??= 'chat';
+    setDrawer(current => current === 'chat' ? null : current);
+  }, []);
+  function leaveDrawerFor(next: View) {
     focusAfterClose.current = 'none';
-    setSlipOpen(false);
-    navigate('parlay');
+    setDrawer(null);
+    navigate(next);
   }
+  function viewParlayFromSlip() { leaveDrawerFor('parlay'); }
+  const onTracked = useCallback((bet: TrackedBet) => {
+    const legs = `${bet.legs.length} ${bet.legs.length === 1 ? 'leg' : 'legs'}`;
+    const stake = bet.stake !== null ? ` · stake ${units(bet.stake)}` : '';
+    setToast({ id: Date.now(), title: 'Parlay tracked', detail: `${legs} · game date ${dateLabel(bet.event_date, true)}${stake}` });
+    setLedgerVersion(value => value + 1);
+  }, []);
+  const closeToast = useCallback(() => setToast(null), []);
   function run(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!datasetId || !players.some(player => player.id === form.player_id && player.games >= 10)) { setForecastError('At least 10 completed games are required. Player details remain available without a forecast.'); return; }
@@ -263,8 +299,62 @@ export default function App() {
     launchBall(origin, document.getElementById('parlay-slip-button'), () => setBounce(value => value + 1));
   }
 
+  const focus = useMemo<ChatFocus | null>(() => {
+    if (!visibleApplied) return null;
+    const { request, data } = visibleApplied;
+    return {
+      dataset_id: request.dataset_id, player_id: request.player_id, player: data.player.name, team: currentTeam ?? data.player.team,
+      stat: request.stat, line: request.line, model: request.model, lookback: request.lookback,
+      expected_minutes: request.expected_minutes, rest_days: request.rest_days, opponent: request.opponent, use_context: request.use_context,
+    };
+  }, [visibleApplied, currentTeam]);
+  const currentSlip = useMemo(() => chatSlip(parlay.legs, parlay.bookOdds), [parlay.legs, parlay.bookOdds]);
+  const currentSlipHash = useMemo(() => slipHash(currentSlip), [currentSlip]);
+  const chat = useChat({
+    getSlip: () => currentSlip,
+    getFocus: () => focus,
+    applySlip: (slip, sent): SlipApplication => {
+      if (JSON.stringify(currentSlip) !== JSON.stringify(sent)) {
+        return { applied: false, hash: null, notes: ['Your slip changed while Coach was answering, so this change was not applied. Ask again to apply it to the slip as it is now.'] };
+      }
+      const outcome = parlay.replaceSlip(slip);
+      const notes: string[] = [];
+      if (outcome.dropped) notes.push(`${outcome.dropped} ${outcome.dropped === 1 ? 'leg' : 'legs'} from Coach could not be used and ${outcome.dropped === 1 ? 'was' : 'were'} left out of the slip.`);
+      if (outcome.oddsDropped) notes.push('Coach sent book odds outside −10000 to −100 or +100 to +10000, so the book odds were cleared.');
+      return { applied: true, hash: slipHash(chatSlip(outcome.legs, bookOddsText(validBookOdds(slip.book_odds)))), notes };
+    },
+  });
+  const chatReply = chat.reply;
+  const chatMessages = chat.conversation.messages;
+  useEffect(() => {
+    if (!chatReply) return;
+    const message = chatMessages.find(item => item.id === chatReply.messageId);
+    if (!message || message.role !== 'coach') return;
+    if (drawerRef.current !== 'chat') {
+      setChatUnread(true);
+      announce('Coach replied. Open Ask Coach to read the answer.');
+    }
+    const { actions, cards } = message.reply;
+    if (actions.some(action => action.type === 'track_bet') || cards.some(card => card.type === 'bet' || card.type === 'track_record' || card.type === 'learning')) {
+      setLedgerVersion(value => value + 1);
+    }
+    // Runs once per reply; the message list is read here, not watched.
+  }, [chatReply]);
+  const slipEvent = chat.slipEvent;
+  useEffect(() => {
+    if (!slipEvent) return;
+    const bump = () => { setBounce(value => value + 1); setChatBounce(value => value + 1); };
+    const inChat = drawerRef.current === 'chat';
+    const message = document.querySelector<HTMLElement>(`[data-message="${slipEvent.messageId}"]`);
+    const origin = inChat ? message?.querySelector<HTMLElement>('.chat-receipts') ?? message ?? null : document.getElementById('chat-launcher');
+    const target = document.getElementById(inChat ? 'chat-slip-chip' : 'parlay-slip-button');
+    if (!origin || !target) { bump(); return; }
+    launchBall(origin, target, bump);
+  }, [slipEvent]);
+  const toastNode = toast && <Toast key={toast.id} toast={toast} onClose={closeToast} onOpenRecord={() => { setToast(null); leaveDrawerFor('record'); }} />;
+
   return <>
-    <div className="app-shell" inert={slipOpen}>
+    <div className="app-shell" inert={drawer !== null}>
       <a href="#main-content" className="skip-link">Skip to main content</a>
       <header className="arena-header">
         <div className="arena-header-inner">
@@ -295,23 +385,29 @@ export default function App() {
         <div className="provenance-strip"><span className="source-badge"><span className="tiny-dot" />{mode === 'league' ? 'Current NBA roster' : 'Saved research study'}</span><span>{mode === 'league' ? roster ? `${roster.total_players} players · ${roster.total_teams} teams` : 'Waiting for NBA directory' : activeDataset ? `${sourceLabel(activeDataset.source)} · ${activeDataset.rows} game rows` : 'Loading saved study'}</span><button className="text-button" onClick={() => navigate('player')}>Player details <ArrowUpRight size={13} /></button></div>
         {datasetError && <ErrorNotice message={datasetError} onRetry={() => { void loadDatasets(); }} />}
         {(view === 'forecast' || view === 'player') && mode === 'league' && <LeagueSelector roster={roster} loading={rosterLoading} error={rosterError} selectedId={selectedId} onSelect={selectPlayer} onRefresh={() => { void loadRoster(true); }} historyWindow={historyWindow} onHistoryWindowChange={setHistoryWindow} seasonType={seasonType} onSeasonTypeChange={setSeasonType} busy={historyLoading} onReload={refreshPlayer} onDetails={() => navigate('player')} />}
-        {mode === 'saved' && view !== 'parlay' && <div className="notice research-notice"><Database size={18} /><div><strong>Saved study mode, not a league roster limit.</strong><p>{activeDataset ? historySyncLabel(activeDataset) : 'Reading saved game rows.'}</p><button className="text-button" onClick={browseLeague}>Browse every current NBA player <ArrowUpRight size={13} /></button></div></div>}
+        {mode === 'saved' && view !== 'parlay' && view !== 'record' && <div className="notice research-notice"><Database size={18} /><div><strong>Saved study mode, not a league roster limit.</strong><p>{activeDataset ? historySyncLabel(activeDataset) : 'Reading saved game rows.'}</p><button className="text-button" onClick={browseLeague}>Browse every current NBA player <ArrowUpRight size={13} /></button></div></div>}
         <section className="view-section" hidden={view !== 'forecast'} aria-label="Forecast lab">
           {historyError && <ErrorNotice message={historyError} onRetry={mode === 'league' ? () => { void loadHistory(selectedId, historyWindow, seasonType); } : () => { void loadSaved(savedId); }} />}
           <ForecastPanel form={form} onChange={setForm} players={players} playersLoading={historyLoading || (mode === 'league' && rosterLoading)} applied={visibleApplied} busy={forecastBusy} dirty={dirty} error={forecastError} onRun={run} onRevert={() => { if (visibleApplied) setForm(formFromRequest(visibleApplied.request)); }} onValidation={() => navigate('validation')} onData={() => navigate('player')} showPlayerSelect={mode === 'saved'} historyNotice={historyNotice} currentTeam={currentTeam}
             slipLegs={parlay.legs} slipFull={parlay.full} onAddLeg={addLeg} onOpenSlip={openSlip} />
         </section>
-        <section className="view-section" hidden={view !== 'parlay'} aria-label="Parlay"><ParlayView parlay={parlay} onForecast={() => navigate('forecast')} /></section>
+        <section className="view-section" hidden={view !== 'parlay'} aria-label="Parlay"><ParlayView parlay={parlay} onForecast={() => navigate('forecast')} onTracked={onTracked} /></section>
+        <section className="view-section" hidden={view !== 'record'} aria-label="Track record"><TrackRecord active={view === 'record'} version={ledgerVersion} onParlay={() => navigate('parlay')} onCoach={openChat} /></section>
         <section className="view-section" hidden={view !== 'player'} aria-label="Player intel"><PlayerIntelligence player={selectedPlayer} profile={profile.data} profileLoading={profile.loading} profileError={profile.error} career={career.data} careerLoading={career.loading} careerError={career.error} history={history} historyLoading={historyLoading} historyError={historyError} /></section>
         <section className="view-section" hidden={view !== 'validation'} aria-label="Model validation"><ValidationPanel applied={visibleApplied} datasetId={datasetId} onForecast={() => navigate('forecast')} /></section>
         <section className="view-section" hidden={view !== 'notebook'} aria-label="Market notebook"><LineNotebook applied={visibleApplied} onForecast={() => navigate('forecast')} /></section>
         <section className="view-section" hidden={view !== 'data'} aria-label="NBA history"><DataWorkspace datasets={datasets} datasetId={datasetId} onSelect={selectSaved} onBrowseLeague={browseLeague} onRefresh={() => { void loadDatasets(); }} refreshing={datasetsLoading} /></section>
-        <section className="view-section" hidden={view !== 'methodology'} aria-label="Methodology"><Methodology onValidation={() => navigate('validation')} onData={() => navigate('data')} onParlay={() => navigate('parlay')} /></section>
+        <section className="view-section" hidden={view !== 'methodology'} aria-label="Methodology"><Methodology onValidation={() => navigate('validation')} onData={() => navigate('data')} onParlay={() => navigate('parlay')} onRecord={() => navigate('record')} /></section>
         <footer className="page-footer"><div className="footer-brand"><Ball /><strong>COURTSIDE</strong><span>Built for better questions.</span></div><span>Probabilities, not certainties <span className="slash">/</span> Research only, not betting advice</span></footer>
       </main>
       <SlipButton count={parlay.legs.length} open={slipOpen} bounce={bounce} onOpen={openSlip} />
+      <ChatLauncher open={chatOpen} busy={chat.pending !== null} unread={chatUnread} onOpen={openChat} />
     </div>
-    <SlipDrawer parlay={parlay} open={slipOpen} onClose={closeSlip} onViewParlay={viewParlayFromSlip} />
+    <SlipDrawer parlay={parlay} open={slipOpen} onClose={closeSlip} onViewParlay={viewParlayFromSlip} onTracked={onTracked} toast={slipOpen ? toastNode : null} />
+    <ChatPanel chat={chat} open={chatOpen} onClose={closeChat} focus={focus} slipCount={parlay.legs.length}
+      slipProbability={parlay.result && !parlay.stale ? parlay.result.data.probability : null} slipBusy={parlay.computing} slipHash={currentSlipHash} bounce={chatBounce}
+      onOpenSlip={openSlip} onOpenParlay={() => leaveDrawerFor('parlay')} onOpenRecord={() => leaveDrawerFor('record')} />
+    {drawer === null && toastNode}
     <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
   </>;
 }

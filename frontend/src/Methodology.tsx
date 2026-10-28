@@ -1,7 +1,7 @@
-import { ArrowRight, Binary, BookOpen, CircleHelp, Database, FlaskConical, Layers, Scale, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Binary, BookOpen, BrainCircuit, CircleHelp, Database, FlaskConical, Layers, Scale, ShieldCheck } from 'lucide-react';
 import { Basketball, SectionHeading } from './components';
 
-export default function Methodology({ onValidation, onData, onParlay }: { onValidation: () => void; onData: () => void; onParlay: () => void }) {
+export default function Methodology({ onValidation, onData, onParlay, onRecord }: { onValidation: () => void; onData: () => void; onParlay: () => void; onRecord: () => void }) {
   return <>
     <article className="card methodology-intro"><div><span className="eyebrow">TRANSPARENCY IS A FEATURE</span><h2>A model is a lens.<br />Not a crystal ball.</h2><p>Courtside turns completed NBA player-game logs into explicit probability distributions. Every forecast comes with its sample, assumptions, provenance, and limitations attached.</p><p>The player selector comes from NBA's current roster endpoint, including rookies who have not played. It is not restricted to previously cached players or the package's bundled directory. Roster classification is not medical availability.</p><div className="technology-tags">{['Python', 'Pandas', 'NumPy', 'SciPy', 'nba_api', 'FastAPI', 'React'].map(name => <span key={name}>{name}</span>)}</div></div><Basketball /></article>
     <article className="card methodology-section"><SectionHeading eyebrow="01 / THE FOUNDATION" title="Five stats. Four statistical lenses." /><p>Points, rebounds, assists, steals, and blocks are nonnegative counts. No single distribution is right for every player, statistic, or sample. Auto-selection applies backend rules to the selected historical window; it is not a claim of universally superior predictive skill.</p>
@@ -41,6 +41,24 @@ export default function Methodology({ onValidation, onData, onParlay }: { onVali
           </ul>
           <p>Research only, not betting advice: probabilities, not certainties. Injuries, lineups and role changes the sample has not seen are not captured.</p>
           <button className="text-button" onClick={onParlay}>Open the parlay builder <ArrowRight size={15} /></button>
+        </div>
+      </div>
+    </article>
+    <article className="card methodology-section"><SectionHeading eyebrow="08 / COACH & LEARNING" title="Ask in plain words. Every number is computed."><BrainCircuit size={21} className="subtle" /></SectionHeading>
+      <div className="two-column method-parlay">
+        <div>
+          <p><strong>Coach</strong>, the chat assistant, reads commands such as “add Jokić over 26.5 points”, “flip leg 2” or “book has it at +450” with a built-in parser wired to the same forecast and parlay code as the rest of COURTSIDE, so a change made in chat is the same change you could make by hand, and the slip stays in step.</p>
+          <p>An optional LLM, any OpenAI-compatible endpoint (OpenAI, Azure OpenAI v1, or a local Ollama or LM Studio model), can take the open-ended questions. It phrases the answer; every probability, price and average still comes from the app’s own tools, never from the language model.</p>
+          <p className="method-footnote">Price checks compare the offered odds’ break-even probability with the model’s. Without entered odds, Coach assumes −110 on every leg priced as independent, and says so: that is a reference point, not a real book price.</p>
+        </div>
+        <div>
+          <ul className="method-rules">
+            <li><strong>Graded results.</strong> Parlays you track are graded against final box scores; each leg becomes a labelled outcome beside the probability the model gave it.</li>
+            <li><strong>Gated calibration.</strong> A recalibration layer is refitted on graded outcomes and switched on only when it beats the raw model on recent held-out games. Otherwise the raw model stands.</li>
+            <li><strong>Memory.</strong> Coach remembers nicknames you teach it or confirm, and your thumbs up or down on its answers. You can make it forget a nickname at any time.</li>
+          </ul>
+          <p>Learning narrows calibration error; it does not see injuries or lineups the data lacks. Probabilities, not certainties. Research only, not betting advice.</p>
+          <button className="text-button" onClick={onRecord}>Open the Track record <ArrowRight size={15} /></button>
         </div>
       </div>
     </article>

@@ -1,12 +1,14 @@
-import { ArrowRight, Info, Link2, ShieldAlert, TriangleAlert } from 'lucide-react';
+import { ArrowRight, BrainCircuit, ClipboardCheck, Info, Link2, ShieldAlert, TriangleAlert } from 'lucide-react';
 import { useRef } from 'react';
 import { edgePoints, pct, signed } from './api';
+import type { TrackedBet } from './assistant-types';
 import { CourtLines, ErrorNotice, Field, ScoreboardDigits, SectionHeading, SwishHoop } from './components';
 import { useCountUp } from './motion';
 import { MAX_LEGS, americanLabel, basisNames, chance, chanceDigits, decimalOdds, effectStrength, legNumber, liftSentence, pairEffect } from './parlay';
 import type { SlipLeg } from './parlay';
 import type { ParlayLegRequest, ParlayPair, ParlayResult } from './parlay-types';
 import { LegEditor, focusNearestLeg } from './ParlayLegs';
+import { TrackBetForm } from './TrackBet';
 import { computedLeg } from './useParlay';
 import type { ParlayState } from './useParlay';
 
@@ -43,6 +45,7 @@ function Scoreboard({ data, count, stale, computing, blocked }: { data: ParlayRe
         <div><span>Correlation lift</span><strong>{data.correlation_lift === null ? 'N/A' : `×${data.correlation_lift.toFixed(2)}`}</strong></div>
       </div>
       <p className="lift-sentence">{liftSentence(data)}</p>
+      {data.calibration && <p className="scoreboard-cal"><BrainCircuit size={14} aria-hidden="true" /><span>Calibrated <strong>{chance(data.calibration.probability)}</strong> <span className="scoreboard-cal-note">· {data.calibration.note}</span></span></p>}
       {data.no_loss_probability !== null && <p className="scoreboard-note">No leg loses (a push on a whole-number line refunds that leg): <strong>{chance(data.no_loss_probability)}</strong>.</p>}
       <p className="scoreboard-foot">Fair odds are the price with no margin for this probability. Calculated at {new Date(data.computed_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</p>
     </>}
@@ -130,9 +133,10 @@ function History({ data }: { data: ParlayResult }) {
   </article>;
 }
 
-export default function ParlayView({ parlay, onForecast }: { parlay: ParlayState; onForecast: () => void }) {
+export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: ParlayState; onForecast: () => void; onTracked: (bet: TrackedBet) => void }) {
   const { legs, result, stale, computing, error } = parlay;
   const data = result?.data ?? null;
+  const calibration = data?.calibration ?? null;
   const fresh = data !== null && !stale && !computing;
   const legErrors = error ? Object.keys(error.legs).length : 0;
   const view = useRef<HTMLDivElement>(null);
@@ -156,10 +160,24 @@ export default function ParlayView({ parlay, onForecast }: { parlay: ParlayState
         <Scoreboard data={data} count={legs.length} stale={stale} computing={computing} blocked={!computing && error !== null && (error.general.length > 0 || legErrors > 0)} />
         <BookOdds parlay={parlay} data={data} />
       </div>
+      <section className="card track-card" aria-labelledby="track-card-title">
+        <span className="track-card-icon" aria-hidden="true"><ClipboardCheck size={22} /></span>
+        <div className="track-card-copy">
+          <span className="eyebrow">KEEP SCORE</span>
+          <h2 id="track-card-title">Grade it when the games end</h2>
+          <p>Tracking saves these legs and the model’s probability now. Once the games are final, grade it on Track record. Graded results feed the learning loop.</p>
+        </div>
+        <TrackBetForm parlay={parlay} onTracked={onTracked} context="view" />
+      </section>
       <section className="parlay-legs" aria-labelledby="parlay-legs-title">
         <div className="section-heading"><div className="section-heading-copy"><span className="eyebrow"><CourtLines />THE LEGS</span><h2 id="parlay-legs-title">Leg by leg</h2></div><span className="pill">{legs.length} of {MAX_LEGS}</span></div>
-        <ol className="leg-grid">{legs.map((leg, index) => <LegEditor key={`${leg.request.player_id}:${leg.request.stat}`} leg={leg} index={index} detailed computed={computedLeg(result, leg, index)} computing={computing}
-          errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onRemove={removeLeg} />)}</ol>
+        <ol className="leg-grid">{legs.map((leg, index) => {
+          const computed = computedLeg(result, leg, index);
+          return <LegEditor key={`${leg.request.player_id}:${leg.request.stat}`} leg={leg} index={index} detailed computed={computed} computing={computing}
+            calibrated={computed && calibration ? calibration.legs[index] ?? null : null}
+            errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onRemove={removeLeg} />;
+        })}</ol>
+        {calibration && <p className="calibration-legend"><BrainCircuit size={14} aria-hidden="true" /><span>“cal.” is each leg after the learning loop’s calibration, based on {calibration.samples} graded predictions. It is on only because it beat the raw model on recent held-out games.</span></p>}
       </section>
       {data && result && <div className={`parlay-details${stale ? ' is-stale' : ''}`}>
         {data.legs.length > 1 && <Linkage data={data} requests={result.request.legs} legs={legs} />}

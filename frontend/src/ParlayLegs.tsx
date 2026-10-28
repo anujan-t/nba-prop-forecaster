@@ -58,12 +58,14 @@ interface LegEditorProps {
   computing: boolean;
   errors?: string[];
   detailed?: boolean;
+  /** The learning loop's recalibrated probability for this leg, when calibration is active. */
+  calibrated?: number | null;
   onSide: (index: number, side: Side) => void;
   onLine: (index: number, line: number) => void;
   onRemove: (index: number) => void;
 }
 
-export function LegEditor({ leg, index, computed, computing, errors, detailed = false, onSide, onLine, onRemove }: LegEditorProps) {
+export function LegEditor({ leg, index, computed, computing, errors, detailed = false, calibrated = null, onSide, onLine, onRemove }: LegEditorProps) {
   const description = legDescription(leg);
   const shown = computed?.leg ?? null;
   const fresh = computed?.fresh ?? false;
@@ -87,6 +89,7 @@ export function LegEditor({ leg, index, computed, computing, errors, detailed = 
         <div className="leg-bar" aria-hidden="true"><span style={{ width: probability === null ? '0%' : pct(Math.min(1, Math.max(0, probability))) }} /></div>
         <span className="leg-percent">
           {probability === null ? (computing ? 'Calculating…' : '—') : <>{chance(probability)}<span className="sr-only"> chance this leg wins</span></>}
+          {probability !== null && calibrated !== null && Number.isFinite(calibrated) && <span className="cal-tag" title="After the learning loop’s calibration">cal. {chance(calibrated)}<span className="sr-only"> after calibration</span></span>}
           {probability !== null && !fresh && <span className="stale-tag">{computing ? 'updating' : 'out of date'}</span>}
         </span>
       </div>

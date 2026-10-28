@@ -194,12 +194,55 @@ PARLAY BUILDER
   in shared past games, as a check on the model. Fair odds = 1/probability.
   Research only: probabilities, not certainties; no wagering is automated.
 
+COURTSIDE COACH (CHAT)
+  A chat panel on every view. It works offline with no setup: a built-in
+  parser understands slip commands and common questions and calls the same
+  forecast, parlay and history code as the UI.
+    Build:    "add Jokic over 26.5 points and Murray 21+ points",
+              "remove leg 2", "flip the Murray leg", "change leg 1 line to
+              27.5", "make it the under", "undo", "clear my slip"
+    Price:    "what are my odds?", "book has it at +450, good price?",
+              "Jokic over 26.5 at -115?" (odds: +450, -120, 5.5x, 9/2, evens)
+    Research: "what's SGA averaging?", "how often has Wemby gone over 3.5
+              blocks in his last 10 games?", "why are my legs linked?"
+    Track:    "track this for $10 at +450 tonight", "grade my bets"
+    Memory:   "remember joker means Nikola Jokic", "forget joker"
+  Ambiguous names ("Murray", "Jalen") prompt a choice; the choice is
+  remembered. The chat edits the same slip as the UI (undo restores it).
+  House comparison: break-even = 1 / decimal odds; expected return per unit =
+  p * (decimal - 1) - (1 - p); house edge = minus that. Without entered
+  odds it assumes -110 on every leg priced as independent, and says so.
+  Single props refund pushes, so their comparison is conditional on settling.
+
+  Optional language model: set COURTSIDE_LLM_MODEL (plus
+  COURTSIDE_LLM_API_KEY and/or COURTSIDE_LLM_BASE_URL) in a git-ignored
+  .env file; see .env.example (OpenAI, Azure OpenAI v1, local Ollama or
+  LM Studio). Commands still run through the built-in parser; the model
+  answers open-ended messages and can only get numbers by calling the
+  app's tools (forecast, price, slip edits, track record). Any failure
+  falls back to the built-in coach. Keys are never logged or returned.
+
+GETTING SMARTER OVER TIME
+  1. Track record: tracked bets are graded from NBA box scores the day after
+     their game date (won/lost/push; void if the player has no game that
+     date). ROI, legs won vs expected and Brier score are reported.
+  2. Calibration: walk-forward predictions on every stored player history
+     (several lines around each rolling median) plus graded legs are fitted
+     with logistic recalibration (logit q = a + b logit p, ridge-shrunk to
+     the identity). It is switched on only if it beats the raw model on the
+     most recent 25% of graded predictions; then calibrated probabilities
+     appear beside the raw ones. It refits in the background when new games
+     are imported or bets are graded.
+  3. Memory: learned nicknames, and thumbs up/down on replies; liked replies
+     become examples for the language model.
+
 PROJECT STATUS
   Implemented: synthetic pipeline; models; odds; calibration/Brier scoring;
   scenario features; complete current-roster discovery; current player
   profiles; detailed box scores/splits/shooting; career history; direct NBA
   history with cache/refresh; legacy CSV support; persistent line tracking;
-  correlation-aware parlay builder.
+  correlation-aware parlay builder; chat coach with slip commands; bet
+  tracker with automatic grading; calibration learned from results.
   Primary endpoints:
     GET /api/nba/roster
     GET /api/nba/players?search=<name> (all current matches, no result cap)
@@ -211,6 +254,11 @@ PROJECT STATUS
       {legs:[{dataset_id, player_id, stat, line, side:"over"|"under",
               model, lookback, expected_minutes, rest_days, opponent,
               use_context}], book_odds: American odds or null}
+    POST /api/assistant/chat {message, conversation_id, slip, focus}
+    POST /api/assistant/feedback, GET /api/assistant/status
+    GET|POST /api/ledger, POST /api/ledger/settle, DELETE /api/ledger/{id}
+    GET /api/learning, POST /api/learning/retrain,
+    DELETE /api/learning/aliases/{phrase}
   Profiles and careers have independent source/fetched-at metadata.
   Player history returns ready, limited or empty, plus history metadata,
   summary, all games, splits, queried seasons and warnings.

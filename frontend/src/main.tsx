@@ -15,6 +15,7 @@ import './styles.css';
 import './views.css';
 import './league.css';
 import './parlay.css';
+import './chat.css';
 import './motion.css';
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);

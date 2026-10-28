@@ -143,6 +143,8 @@
     transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
+  /* Drawers (and everything inside them) must turn visible synchronously so focus can move inside on open. */
+  .slip-layer, .slip-layer *, .chat-layer, .chat-layer * { transition: none !important; }
   .primary-button:hover:not(:disabled) { transform: none; }
   .court-ball-x { transform: translateX(267px); }
   .court-ball-y { transform: translateY(53px); }

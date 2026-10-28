@@ -1,9 +1,11 @@
 import { ArrowRight, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
+import type { TrackedBet } from './assistant-types';
 import { Ball, Busy, ScoreboardDigits } from './components';
 import { MAX_LEGS, americanLabel, chance, chanceDigits } from './parlay';
 import { LegEditor, focusNearestLeg } from './ParlayLegs';
+import { TrackBetForm } from './TrackBet';
 import { computedLeg } from './useParlay';
 import type { ParlayState } from './useParlay';
 
@@ -17,9 +19,9 @@ export function SlipButton({ count, open, bounce, onOpen }: { count: number; ope
 
 const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-interface DrawerProps { parlay: ParlayState; open: boolean; onClose: () => void; onViewParlay: () => void }
+interface DrawerProps { parlay: ParlayState; open: boolean; onClose: () => void; onViewParlay: () => void; onTracked: (bet: TrackedBet) => void; toast?: ReactNode }
 
-export function SlipDrawer({ parlay, open, onClose, onViewParlay }: DrawerProps) {
+export function SlipDrawer({ parlay, open, onClose, onViewParlay, onTracked, toast }: DrawerProps) {
   const panel = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const clearButton = useRef<HTMLButtonElement>(null);
@@ -97,11 +99,13 @@ export function SlipDrawer({ parlay, open, onClose, onViewParlay }: DrawerProps)
       </div>
       <footer className="slip-footer">
         <button type="button" className="primary-button" onClick={onViewParlay}>{legs.length ? 'Open full breakdown' : 'Go to the Parlay view'} <ArrowRight size={16} aria-hidden="true" /></button>
+        {legs.length > 0 && <TrackBetForm parlay={parlay} onTracked={onTracked} context="slip" />}
         {legs.length > 0 && (confirmClear
           ? <div className="clear-confirm" role="group" aria-label="Confirm clearing the slip"><span>Remove all {legs.length} legs?</span><button type="button" className="danger-button" onClick={() => { parlay.clear(); setConfirmClear(false); closeButton.current?.focus(); }}>Clear slip</button><button ref={keepButton} type="button" className="text-button" onClick={() => askClear(false)}>Keep</button></div>
           : <button ref={clearButton} type="button" className="text-button clear-button" onClick={() => askClear(true)}><Trash2 size={14} aria-hidden="true" />Clear slip</button>)}
         <p className="slip-disclaimer">Probabilities, not certainties. Research only, not betting advice.</p>
       </footer>
+      {toast}
     </div>
   </div>;
 }
