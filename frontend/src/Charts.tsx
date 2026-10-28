@@ -43,7 +43,7 @@ export function DistributionChart({ forecast }: { forecast: Forecast }) {
   const step = Math.max(1, Math.ceil(points.length / 8));
   const curve = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${x(point.value)},${y(point.cumulative)}`).join(' ');
   return <div className="chart-component">
-    <div className="chart-toolbar"><div className="chart-legend"><span><i className="legend-dot neutral-dot" />Under</span><span><i className="legend-dot rose-dot" />Over</span>{forecast.probabilities.push > 0 && <span><i className="legend-dot push-dot" />Push</span>}</div>
+    <div className="chart-toolbar"><div className="chart-legend"><span><i className="legend-dot under-dot" />Under</span><span><i className="legend-dot over-dot" />Over</span>{forecast.probabilities.push > 0 && <span><i className="legend-dot push-dot" />Push</span>}</div>
       <div className="segmented small" aria-label="Distribution display">
         <button type="button" aria-pressed={mode === 'mass'} className={mode === 'mass' ? 'selected' : ''} onClick={() => setMode('mass')}>Probability</button>
         <button type="button" aria-pressed={mode === 'cumulative'} className={mode === 'cumulative' ? 'selected' : ''} onClick={() => setMode('cumulative')}>Cumulative</button>
@@ -117,7 +117,7 @@ export function CalibrationChart({ calibration }: { calibration: Backtest['calib
   const selected = active === null ? undefined : bins[active];
   if (!bins.length) return <EmptyState title="Not enough scored predictions" icon={<BarChart3 />}>Calibration needs non-push, out-of-sample evaluations. Try more game logs or all players.</EmptyState>;
   return <div className="chart-component">
-    <div className="chart-toolbar"><div className="chart-legend"><span><i className="legend-dot rose-dot" />Observed calibration</span><span><i className="legend-dash" />Perfect calibration</span></div></div>
+    <div className="chart-toolbar"><div className="chart-legend"><span><i className="legend-dot over-dot" />Observed calibration</span><span><i className="legend-dash" />Perfect calibration</span></div></div>
     <svg viewBox={`0 0 ${width} ${height}`} className="data-chart calibration-chart" role="group" aria-label="Reliability diagram. Predicted probability on the horizontal axis, observed frequency on the vertical axis. A diagonal line denotes perfect calibration." onMouseLeave={() => setActive(null)}>
       {[0, 0.25, 0.5, 0.75, 1].map(value => <g key={value} className="chart-grid"><line x1={left} x2={width - 24} y1={y(value)} y2={y(value)} /><text x={left - 12} y={y(value) + 4} textAnchor="end">{pct(value, 0)}</text><text x={x(value)} y={height - 25} textAnchor="middle">{pct(value, 0)}</text></g>)}
       <path d={`M${x(0)},${y(0)} L${x(1)},${y(1)}`} className="ideal-line" />

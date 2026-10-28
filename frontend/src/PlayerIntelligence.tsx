@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { ArrowLeft, ArrowRight, BookOpen, CalendarDays, CheckCircle2, Database, Info, Search, ShieldCheck, TriangleAlert, UserRound } from 'lucide-react';
 import { dateLabel, decimal, pct, signed, venueLabel } from './api';
-import { Basketball, Busy, EmptyState, ErrorNotice, Field, SectionHeading } from './components';
+import { Basketball, Busy, EmptyState, ErrorNotice, Field, Jersey, SectionHeading } from './components';
 import type {
   CareerLine, OverviewStat, PlayerGame, PlayerHistory, PlayerIntelligenceProps,
   PlayerSplit, PlayerSummary, ShootingSummary,
@@ -28,6 +28,11 @@ const overviewStats: { key: OverviewStat; label: string; short: string }[] = [
 
 function reported(value: string | number | null | undefined): string {
   return value === null || value === undefined || String(value).trim() === '' ? 'Not reported' : String(value);
+}
+
+function jerseyLabel(jersey: string | null | undefined, fallback: string): string {
+  const number = jersey?.trim() ?? '';
+  return /^\d{1,2}$/.test(number) ? number : fallback;
 }
 
 function numberLabel(value: number | null | undefined, digits = 1): string {
@@ -254,7 +259,7 @@ export default function PlayerIntelligence({
     <article className="card intel-profile-hero">
       <Basketball className="intel-profile-watermark" />
       <div className="intel-profile-identity">
-        <div className="intel-player-monogram" aria-hidden="true">{playerId ? monogram : <UserRound size={34} />}</div>
+        {playerId ? <Jersey className="intel-player-jersey" label={jerseyLabel(profileData?.jersey, monogram)} /> : <div className="intel-player-monogram" aria-hidden="true"><UserRound size={34} /></div>}
         <div className="intel-profile-name">
           <span className="eyebrow">PLAYER INTELLIGENCE{playerId && <> <span className="slash">/</span> NBA ID {playerId}</>}</span>
           <h2>{playerName}</h2>
@@ -334,8 +339,8 @@ export default function PlayerIntelligence({
 
     <div id={`${instanceId}-panel-games`} role="tabpanel" aria-labelledby={`${instanceId}-tab-games`} hidden={tab !== 'games'} tabIndex={0} className="intel-tab-panel">
       <article className="card intel-game-log">
-        <SectionHeading eyebrow="EVERY RETURNED GAME, FULLY ACCESSIBLE" title="The completed-game ledger"><span className="pill">Newest first</span></SectionHeading>
-        {historyLoading && <div className="intel-inline-loading"><Busy text={historyData ? 'Refreshing history; the displayed ledger is the previous snapshot.' : 'Loading completed game logs…'} /></div>}
+        <SectionHeading eyebrow="EVERY RETURNED GAME, FULLY ACCESSIBLE" title="The completed-game log"><span className="pill">Newest first</span></SectionHeading>
+        {historyLoading && <div className="intel-inline-loading"><Busy text={historyData ? 'Refreshing history; the displayed log is the previous snapshot.' : 'Loading completed game logs…'} /></div>}
         {historyData && <div className="intel-history-window"><span><CalendarDays size={14} aria-hidden="true" />{historyLabel(historyData)}</span><p>Team columns reflect each historical game—not necessarily the player’s current roster team.</p></div>}
         {games.length > 0 && <>
           <div className="intel-log-toolbar">

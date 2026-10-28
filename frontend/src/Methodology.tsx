@@ -1,7 +1,7 @@
-import { ArrowRight, Binary, BookOpen, CircleHelp, Database, FlaskConical, Scale, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Binary, BookOpen, CircleHelp, Database, FlaskConical, Layers, Scale, ShieldCheck } from 'lucide-react';
 import { Basketball, SectionHeading } from './components';
 
-export default function Methodology({ onValidation, onData }: { onValidation: () => void; onData: () => void }) {
+export default function Methodology({ onValidation, onData, onParlay }: { onValidation: () => void; onData: () => void; onParlay: () => void }) {
   return <>
     <article className="card methodology-intro"><div><span className="eyebrow">TRANSPARENCY IS A FEATURE</span><h2>A model is a lens.<br />Not a crystal ball.</h2><p>Courtside turns completed NBA player-game logs into explicit probability distributions. Every forecast comes with its sample, assumptions, provenance, and limitations attached.</p><p>The player selector comes from NBA's current roster endpoint, including rookies who have not played. It is not restricted to previously cached players or the package's bundled directory. Roster classification is not medical availability.</p><div className="technology-tags">{['Python', 'Pandas', 'NumPy', 'SciPy', 'nba_api', 'FastAPI', 'React'].map(name => <span key={name}>{name}</span>)}</div></div><Basketball /></article>
     <article className="card methodology-section"><SectionHeading eyebrow="01 / THE FOUNDATION" title="Five stats. Four statistical lenses." /><p>Points, rebounds, assists, steals, and blocks are nonnegative counts. No single distribution is right for every player, statistic, or sample. Auto-selection applies backend rules to the selected historical window; it is not a claim of universally superior predictive skill.</p>
@@ -25,6 +25,25 @@ export default function Methodology({ onValidation, onData }: { onValidation: ()
       <article className="card methodology-section"><SectionHeading eyebrow="05 / THE EVALUATION" title="Walk forward. Never peek."><FlaskConical size={21} className="subtle" /></SectionHeading><p>The first 15 games establish a warm-up history. For each later game, fit to older rows within the chosen lookback, estimate the over probability, and compare it with the held-out outcome. Pushes are excluded from binary scoring.</p><div className="formula-block"><code>Brier = mean((predicted − outcome)²)</code><code>Skill = 1 − model Brier / baseline Brier</code></div><p>Lower Brier and log loss are better. Calibration asks whether similar probability forecasts match their observed frequencies. Always inspect sample counts. Fixed scenario lines and adaptive prior-median half-point lines are <strong>not historical market lines</strong>; this is not a historical betting-profit simulation.</p><button className="text-button" onClick={onValidation}>Open model validation <ArrowRight size={15} /></button></article>
       <article className="card methodology-section"><SectionHeading eyebrow="06 / THE SOURCE & ITS LIMITS" title="NBA Stats is the starting point."><Database size={21} className="subtle" /></SectionHeading><p>Historical completed games come directly from the endpoints behind NBA.com through the community-maintained <code>nba_api</code> client. No API key or CSV upload is needed. Availability varies by player, season and statistical category.</p><p>Structured responses are stored as native records in a local SQLite cache. Load reuses history fetched within six hours; expired history is fetched again. Refresh always contacts NBA and updates the same history. NBA outages never silently produce fabricated or synthetic results.</p><p>The optional synthetic fixture is only for reproducible development, never evidence of real NBA accuracy. Source and retrieval time accompany forecasts. No live odds, injury updates or automatic market history are implied.</p><button className="text-button" onClick={onData}>Inspect NBA history <ArrowRight size={15} /></button></article>
     </div>
+    <article className="card methodology-section"><SectionHeading eyebrow="07 / PARLAY BUILDER" title="Every leg has to land."><Layers size={21} className="subtle" /></SectionHeading>
+      <div className="two-column method-parlay">
+        <div>
+          <p>Combine 1–10 legs, one per player and stat. Each leg is priced by exactly the same model and settings as the Forecast lab, and the parlay wins only if every leg wins.</p>
+          <div className="formula-block"><code>Independent = p₁ × p₂ × … × pₙ</code><code>ρ = 2·sin(π·ρₛ/6) × n/(n + 10)</code><code>Joint = P(every leg wins)</code><code>Fair decimal odds = 1 / joint</code></div>
+          <p className="method-footnote">ρₛ is the Spearman rank correlation of the two stats over n shared games; ρ is the copula correlation, capped at ±0.95. The joint is the multivariate-normal orthant probability (Genz algorithm, fixed seed), so identical inputs always give the same answer.</p>
+        </div>
+        <div>
+          <ul className="method-rules">
+            <li><strong>Linked legs.</strong> The same player, or current teammates, joined by a Gaussian copula fitted on shared recent games: each player’s last 30, or a longer lookback. Below 10 shared games, no link is assumed. Opposite sides flip the direction of a link.</li>
+            <li><strong>Independent legs.</strong> Players on different teams, even when they meet: head-to-head linkage is not modelled.</li>
+            <li><strong>Pushes.</strong> A push counts as not winning. For whole-number lines, the chance that no leg loses (each wins or pushes) is shown separately. Returns against entered odds treat a push as a loss.</li>
+            <li><strong>History check.</strong> How often all linked legs hit together in shared past games, beside the model’s figure: a sanity check, not a backtest.</li>
+          </ul>
+          <p>Research only, not betting advice: probabilities, not certainties. Injuries, lineups and role changes the sample has not seen are not captured.</p>
+          <button className="text-button" onClick={onParlay}>Open the parlay builder <ArrowRight size={15} /></button>
+        </div>
+      </div>
+    </article>
     <div className="methodology-disclaimer"><Basketball /><div><h3>Built for inquiry, not instructions to wager.</h3><p>Educational and portfolio research only. Probability estimates contain uncertainty, model risk, and data limitations. They are not financial advice or recommendations to gamble.</p></div></div>
   </>;
 }

@@ -1,32 +1,48 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ArrowUpRight, BookOpen, ChartNoAxesCombined, ChevronRight, Database, FlaskConical, Moon, PanelTop, Sun, UserRound } from 'lucide-react';
+import { ArrowUpRight, BookOpen, ChartNoAxesCombined, Database, FlaskConical, Layers, Moon, PanelTop, Sun, UserRound } from 'lucide-react';
 import { api, defaultForm, formFromRequest, historySyncLabel, isAbort, messageOf, requestFromForm, sourceLabel, validateOdds } from './api';
-import { Basketball, CourtMotif, ErrorNotice } from './components';
+import { Ball, CourtArt, ErrorNotice, Jersey } from './components';
+import CourtNav from './CourtNav';
+import type { NavItem } from './CourtNav';
 import DataWorkspace from './DataWorkspace';
 import ForecastPanel from './ForecastPanel';
 import LeagueSelector from './LeagueSelector';
 import PlayerIntelligence from './PlayerIntelligence';
 import LineNotebook from './LineNotebook';
 import Methodology from './Methodology';
+import { launchBall } from './motion';
+import { MAX_LEGS, legFromForecast, sideNames, statLabel } from './parlay';
+import type { Side } from './parlay-types';
+import { SlipButton, SlipDrawer } from './ParlaySlip';
+import ParlayView from './ParlayView';
+import { useParlay } from './useParlay';
 import ValidationPanel from './ValidationPanel';
 import { usePlayerResource } from './usePlayerResource';
 import type { AppliedForecast, Dataset, Forecast, ForecastForm, ForecastRequest, Player, View } from './types';
 import type { LeagueRoster, PlayerCareer, PlayerHistory, PlayerProfile } from './league-types';
-import './league.css';
 
-const views: { id: View; label: string; short: string; icon: typeof ChartNoAxesCombined; eyebrow: string; title: string; description: string }[] = [
-  { id: 'forecast', label: 'Forecast lab', short: 'Prop Lab', icon: ChartNoAxesCombined, eyebrow: '01 / EVERY CURRENT NBA PLAYER', title: 'Every line has a story.', description: 'The whole league. Real game history. Your assumptions, kept in view.' },
-  { id: 'player', label: 'Player intel', short: 'Player intel', icon: UserRound, eyebrow: '02 / THE PLAYER BEHIND THE NUMBERS', title: 'Know the whole picture.', description: 'Current profiles, shooting, recent form, game logs and career history. No sample-player ceiling.' },
-  { id: 'validation', label: 'Model validation', short: 'Validation', icon: FlaskConical, eyebrow: '03 / PUT IT TO THE TEST', title: 'Evidence over intuition.', description: 'Out-of-sample evaluation. Honest baselines. No victory laps on training data.' },
-  { id: 'notebook', label: 'Market notebook', short: 'Notebook', icon: BookOpen, eyebrow: '04 / FOLLOW THE QUESTION', title: 'Watch the line, not the noise.', description: 'A deliberate record of manual market snapshots, one game and one book at a time.' },
-  { id: 'data', label: 'NBA history', short: 'NBA history', icon: Database, eyebrow: '05 / DIRECT FROM NBA.COM', title: 'Straight from the source.', description: 'Saved histories are your research cache, not a limit on which players you can access.' },
-  { id: 'methodology', label: 'Methodology', short: 'Methodology', icon: PanelTop, eyebrow: '06 / OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, and the things this model cannot tell you.' },
+type Theme = 'light' | 'dark';
+const themeStorageKey = 'courtside.theme';
+
+const views: (NavItem & { number: string; eyebrow: string; title: string; description: string })[] = [
+  { id: 'forecast', label: 'Forecast lab', icon: ChartNoAxesCombined, number: '01', eyebrow: 'EVERY CURRENT NBA PLAYER', title: 'Every line has a story.', description: 'The whole league. Real game history. Your assumptions, kept in view.' },
+  { id: 'parlay', label: 'Parlay', icon: Layers, number: '02', eyebrow: 'STACK THE LEGS', title: 'Every leg has to land.', description: 'Combine props into one parlay and see the chance that all of them hit, with same-player and teammate links built in.' },
+  { id: 'player', label: 'Player intel', icon: UserRound, number: '03', eyebrow: 'THE PLAYER BEHIND THE NUMBERS', title: 'Know the whole picture.', description: 'Current profiles, shooting, recent form, game logs and career history. No sample-player ceiling.' },
+  { id: 'validation', label: 'Model validation', icon: FlaskConical, number: '04', eyebrow: 'PUT IT TO THE TEST', title: 'Evidence over intuition.', description: 'Out-of-sample evaluation. Honest baselines. No victory laps on training data.' },
+  { id: 'notebook', label: 'Market notebook', icon: BookOpen, number: '05', eyebrow: 'FOLLOW THE QUESTION', title: 'Watch the line, not the noise.', description: 'A deliberate record of manual market snapshots, one game and one book at a time.' },
+  { id: 'data', label: 'NBA history', icon: Database, number: '06', eyebrow: 'DIRECT FROM NBA.COM', title: 'Straight from the source.', description: 'Saved histories are your research cache, not a limit on which players you can access.' },
+  { id: 'methodology', label: 'Methodology', icon: PanelTop, number: '07', eyebrow: 'OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, and the things this model cannot tell you.' },
 ];
 
 export default function App() {
   const [view, setView] = useState<View>('forecast');
-  const [theme, setTheme] = useState(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  const [theme, setTheme] = useState<Theme>(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  const parlay = useParlay();
+  const [slipOpen, setSlipOpen] = useState(false);
+  const [bounce, setBounce] = useState(0);
+  const [announcement, setAnnouncement] = useState('');
+  const focusAfterClose = useRef<'fab' | 'none' | null>(null);
   const [mode, setMode] = useState<'league' | 'saved'>('league');
   const [roster, setRoster] = useState<LeagueRoster | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
@@ -177,8 +193,15 @@ export default function App() {
   }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--cp-bg').trim());
+    const color = getComputedStyle(document.documentElement).getPropertyValue('--theme-color').trim();
+    if (color) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', color);
   }, [theme]);
+  useEffect(() => {
+    if (slipOpen) return;
+    const target = focusAfterClose.current;
+    focusAfterClose.current = null;
+    if (target === 'fab') document.getElementById('parlay-slip-button')?.focus();
+  }, [slipOpen]);
 
   function navigate(next: View) {
     if (next === 'player' && mode === 'saved') {
@@ -194,10 +217,23 @@ export default function App() {
   function refreshPlayer() {
     if (selectedPlayer) { void loadHistory(selectedId, historyWindow, seasonType, true); profile.refresh(); career.refresh(); }
   }
-  function toggleTheme() {
-    const next = theme === 'dark' ? 'light' : 'dark';
+  function chooseTheme(next: Theme) {
     setTheme(next);
-    const url = new URL(window.location.href); url.searchParams.set('scoutTheme', next); window.history.replaceState({}, '', url);
+    try { window.localStorage.setItem(themeStorageKey, next); } catch { /* storage unavailable: the choice lasts for this page */ }
+    const url = new URL(window.location.href); url.searchParams.set('scoutTheme', next); window.history.replaceState(window.history.state, '', url);
+  }
+  function announce(text: string) {
+    setAnnouncement(current => current === text ? `${text}\u00a0` : text);
+  }
+  const openSlip = useCallback(() => setSlipOpen(true), []);
+  const closeSlip = useCallback(() => {
+    focusAfterClose.current ??= 'fab';
+    setSlipOpen(false);
+  }, []);
+  function viewParlayFromSlip() {
+    focusAfterClose.current = 'none';
+    setSlipOpen(false);
+    navigate('parlay');
   }
   function run(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -212,38 +248,70 @@ export default function App() {
   const historyNotice = mode === 'league' && history
     ? `${history.status === 'empty' ? 'No completed games in this window. ' : history.status === 'limited' ? 'Not enough games for a forecast yet. ' : ''}${history.warnings.join(' ')}`
     : '';
+  const currentTeam = mode === 'league' ? profile.data?.team ?? selectedPlayer?.team : undefined;
 
-  return <div className="app-shell">
-    <a href="#main-content" className="skip-link">Skip to main content</a>
-    <aside className="sidebar" aria-label="Research navigation">
-      <a className="brand" href="#main-content" onClick={() => navigate('forecast')} aria-label="Courtside home"><div className="brand-mark"><Basketball /></div><div><strong>COURTSIDE</strong><small>THE PROP RESEARCH LAB</small></div></a>
-      <div className="sidebar-divider" /><span className="nav-eyebrow">THE RESEARCH LAB</span>
-      <nav>{views.map(item => { const Icon = item.icon; return <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><Icon size={18} strokeWidth={1.7} /><span>{item.label}</span>{view === item.id && <span className="nav-active-dot" />}</button>; })}</nav>
-      <div className="sidebar-bottom"><div className="research-card"><span className="eyebrow">THE RESEARCH MINDSET</span><p>Less noise.<br /><strong>Better questions.</strong></p><Basketball /><span className="research-rule" /></div><div className="engine-stack"><span className="tiny-dot" /><span>Python under the hood</span></div><small className="stack-names">Pandas · NumPy · SciPy</small><div className="sidebar-disclaimer">An independent portfolio project.<br />Educational use. Not betting advice.</div></div>
-    </aside>
-    <div className="workspace">
-      <header className="topbar"><div className="breadcrumb"><span>Research</span><ChevronRight size={12} /><strong>{page.short}</strong></div><div className="topbar-right">
-        <span className="pill">{roster ? `${roster.season} · ${roster.total_players} current players` : 'Connecting to the NBA roster'}</span>
-        <div className={`engine-status ${engine}`}><span />{engine === 'ready' ? 'Engine ready' : engine === 'checking' ? 'Connecting' : 'Engine offline'}</div><div className="topbar-divider" />
-        <button className="icon-button theme-button" onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
-      </div></header>
+  function addLeg(side: Side, origin: HTMLElement) {
+    if (!visibleApplied) return;
+    const request = legFromForecast(visibleApplied, side);
+    const label = { player: visibleApplied.data.player.name, team: currentTeam ?? visibleApplied.data.player.team };
+    const description = `${label.player} ${sideNames[side]} ${request.line} ${statLabel(request.stat)}`;
+    const outcome = parlay.upsertLeg(request, label);
+    if (outcome === 'full') { announce(`The slip is full. Remove a leg before adding another; ${MAX_LEGS} legs is the maximum.`); return; }
+    if (outcome === 'unchanged') { announce(`${description} is already in the slip.`); return; }
+    const count = outcome === 'added' ? parlay.legs.length + 1 : parlay.legs.length;
+    announce(`${outcome === 'added' ? 'Added' : 'Replaced the leg with'} ${description}. The slip has ${count} ${count === 1 ? 'leg' : 'legs'}.`);
+    launchBall(origin, document.getElementById('parlay-slip-button'), () => setBounce(value => value + 1));
+  }
+
+  return <>
+    <div className="app-shell" inert={slipOpen}>
+      <a href="#main-content" className="skip-link">Skip to main content</a>
+      <header className="arena-header">
+        <div className="arena-header-inner">
+          <a className="brand" href="#main-content" onClick={() => navigate('forecast')} aria-label="Courtside, go to the Forecast lab">
+            <Ball className="brand-ball" />
+            <span className="brand-text"><strong>COURTSIDE</strong><small>NBA prop research lab</small></span>
+          </a>
+          <div className="header-meta">
+            <span className="season-chip">{roster ? `${roster.season} · ${roster.total_players} players` : 'Connecting to the NBA roster'}</span>
+            <span className={`engine-status ${engine}`}><span aria-hidden="true" />{engine === 'ready' ? 'Engine ready' : engine === 'checking' ? 'Connecting' : 'Engine offline'}</span>
+            <div className="theme-switch" role="group" aria-label="Colour theme">
+              <button type="button" aria-pressed={theme === 'light'} onClick={() => chooseTheme('light')} title="Day game: light hardwood theme"><Sun size={15} aria-hidden="true" /><span>Day game</span></button>
+              <button type="button" aria-pressed={theme === 'dark'} onClick={() => chooseTheme('dark')} title="Night game: dark arena theme"><Moon size={15} aria-hidden="true" /><span>Night game</span></button>
+            </div>
+          </div>
+        </div>
+      </header>
+      <CourtNav items={views} view={view} onNavigate={navigate} legCount={parlay.legs.length} />
       <main id="main-content" className="main-content">
-        <section className="page-hero"><div className="hero-copy"><div className="hero-kicker"><span className="eyebrow">{page.eyebrow}</span><span className="hero-kicker-line" /></div><h1 ref={headingRef} tabIndex={-1}>{page.title}</h1><p>{page.description}</p></div><div className="hero-art"><CourtMotif /><span>PROBABILITIES, NOT CERTAINTIES.</span></div></section>
+        <section className="page-hero" key={view}>
+          <div className="hero-copy">
+            <div className="hero-kicker"><Jersey label={page.number} className="hero-jersey" /><span className="eyebrow">{page.eyebrow}</span></div>
+            <h1 ref={headingRef} tabIndex={-1}>{page.title}</h1>
+            <p>{page.description}</p>
+          </div>
+          <div className="hero-art"><CourtArt /><span className="hero-tag">Probabilities, not certainties.</span></div>
+        </section>
         <div className="provenance-strip"><span className="source-badge"><span className="tiny-dot" />{mode === 'league' ? 'Current NBA roster' : 'Saved research study'}</span><span>{mode === 'league' ? roster ? `${roster.total_players} players · ${roster.total_teams} teams` : 'Waiting for NBA directory' : activeDataset ? `${sourceLabel(activeDataset.source)} · ${activeDataset.rows} game rows` : 'Loading saved study'}</span><button className="text-button" onClick={() => navigate('player')}>Player details <ArrowUpRight size={13} /></button></div>
         {datasetError && <ErrorNotice message={datasetError} onRetry={() => { void loadDatasets(); }} />}
         {(view === 'forecast' || view === 'player') && mode === 'league' && <LeagueSelector roster={roster} loading={rosterLoading} error={rosterError} selectedId={selectedId} onSelect={selectPlayer} onRefresh={() => { void loadRoster(true); }} historyWindow={historyWindow} onHistoryWindowChange={setHistoryWindow} seasonType={seasonType} onSeasonTypeChange={setSeasonType} busy={historyLoading} onReload={refreshPlayer} onDetails={() => navigate('player')} />}
-        {mode === 'saved' && <div className="notice research-notice"><Database size={18} /><div><strong>Saved study mode, not a league roster limit.</strong><p>{activeDataset ? historySyncLabel(activeDataset) : 'Reading saved game rows.'}</p><button className="text-button" onClick={browseLeague}>Browse every current NBA player <ArrowUpRight size={13} /></button></div></div>}
-        <section hidden={view !== 'forecast'} aria-label="Forecast lab">
+        {mode === 'saved' && view !== 'parlay' && <div className="notice research-notice"><Database size={18} /><div><strong>Saved study mode, not a league roster limit.</strong><p>{activeDataset ? historySyncLabel(activeDataset) : 'Reading saved game rows.'}</p><button className="text-button" onClick={browseLeague}>Browse every current NBA player <ArrowUpRight size={13} /></button></div></div>}
+        <section className="view-section" hidden={view !== 'forecast'} aria-label="Forecast lab">
           {historyError && <ErrorNotice message={historyError} onRetry={mode === 'league' ? () => { void loadHistory(selectedId, historyWindow, seasonType); } : () => { void loadSaved(savedId); }} />}
-          <ForecastPanel form={form} onChange={setForm} players={players} playersLoading={historyLoading || (mode === 'league' && rosterLoading)} applied={visibleApplied} busy={forecastBusy} dirty={dirty} error={forecastError} onRun={run} onRevert={() => { if (visibleApplied) setForm(formFromRequest(visibleApplied.request)); }} onValidation={() => navigate('validation')} onData={() => navigate('player')} showPlayerSelect={mode === 'saved'} historyNotice={historyNotice} currentTeam={mode === 'league' ? profile.data?.team ?? selectedPlayer?.team : undefined} />
+          <ForecastPanel form={form} onChange={setForm} players={players} playersLoading={historyLoading || (mode === 'league' && rosterLoading)} applied={visibleApplied} busy={forecastBusy} dirty={dirty} error={forecastError} onRun={run} onRevert={() => { if (visibleApplied) setForm(formFromRequest(visibleApplied.request)); }} onValidation={() => navigate('validation')} onData={() => navigate('player')} showPlayerSelect={mode === 'saved'} historyNotice={historyNotice} currentTeam={currentTeam}
+            slipLegs={parlay.legs} slipFull={parlay.full} onAddLeg={addLeg} onOpenSlip={openSlip} />
         </section>
-        <section hidden={view !== 'player'} aria-label="Player intel"><PlayerIntelligence player={selectedPlayer} profile={profile.data} profileLoading={profile.loading} profileError={profile.error} career={career.data} careerLoading={career.loading} careerError={career.error} history={history} historyLoading={historyLoading} historyError={historyError} /></section>
-        <section hidden={view !== 'validation'} aria-label="Model validation"><ValidationPanel applied={visibleApplied} datasetId={datasetId} onForecast={() => navigate('forecast')} /></section>
-        <section hidden={view !== 'notebook'} aria-label="Market notebook"><LineNotebook applied={visibleApplied} onForecast={() => navigate('forecast')} /></section>
-        <section hidden={view !== 'data'} aria-label="NBA history"><DataWorkspace datasets={datasets} datasetId={datasetId} onSelect={selectSaved} onBrowseLeague={browseLeague} onRefresh={() => { void loadDatasets(); }} refreshing={datasetsLoading} /></section>
-        <section hidden={view !== 'methodology'} aria-label="Methodology"><Methodology onValidation={() => navigate('validation')} onData={() => navigate('data')} /></section>
-        <footer className="page-footer"><div><Basketball /><strong>COURTSIDE</strong><span>Built for better questions.</span></div><span>Research only <span className="slash">/</span> No guaranteed outcomes</span></footer>
+        <section className="view-section" hidden={view !== 'parlay'} aria-label="Parlay"><ParlayView parlay={parlay} onForecast={() => navigate('forecast')} /></section>
+        <section className="view-section" hidden={view !== 'player'} aria-label="Player intel"><PlayerIntelligence player={selectedPlayer} profile={profile.data} profileLoading={profile.loading} profileError={profile.error} career={career.data} careerLoading={career.loading} careerError={career.error} history={history} historyLoading={historyLoading} historyError={historyError} /></section>
+        <section className="view-section" hidden={view !== 'validation'} aria-label="Model validation"><ValidationPanel applied={visibleApplied} datasetId={datasetId} onForecast={() => navigate('forecast')} /></section>
+        <section className="view-section" hidden={view !== 'notebook'} aria-label="Market notebook"><LineNotebook applied={visibleApplied} onForecast={() => navigate('forecast')} /></section>
+        <section className="view-section" hidden={view !== 'data'} aria-label="NBA history"><DataWorkspace datasets={datasets} datasetId={datasetId} onSelect={selectSaved} onBrowseLeague={browseLeague} onRefresh={() => { void loadDatasets(); }} refreshing={datasetsLoading} /></section>
+        <section className="view-section" hidden={view !== 'methodology'} aria-label="Methodology"><Methodology onValidation={() => navigate('validation')} onData={() => navigate('data')} onParlay={() => navigate('parlay')} /></section>
+        <footer className="page-footer"><div className="footer-brand"><Ball /><strong>COURTSIDE</strong><span>Built for better questions.</span></div><span>Probabilities, not certainties <span className="slash">/</span> Research only, not betting advice</span></footer>
       </main>
+      <SlipButton count={parlay.legs.length} open={slipOpen} bounce={bounce} onOpen={openSlip} />
     </div>
-  </div>;
+    <SlipDrawer parlay={parlay} open={slipOpen} onClose={closeSlip} onViewParlay={viewParlayFromSlip} />
+    <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
+  </>;
 }

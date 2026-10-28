@@ -2,7 +2,10 @@ import { ArrowDownToLine, ArrowRight, ChartNoAxesCombined, ChevronDown, CircleHe
 import type { FormEvent } from 'react';
 import { decimal, downloadJson, edgePoints, modelNames, odds, pct, signed, sourceLabel, statNames } from './api';
 import { DistributionChart, RecentGamesChart } from './Charts';
-import { Busy, EmptyState, ErrorNotice, Field, SectionHeading, StatCard } from './components';
+import { Busy, EmptyState, ErrorNotice, Field, Jersey, SectionHeading, StatCard } from './components';
+import type { SlipLeg } from './parlay';
+import type { Side } from './parlay-types';
+import { ForecastParlayActions } from './ParlayLegs';
 import type { AppliedForecast, ForecastForm, Model, Player, Stat } from './types';
 
 interface Props {
@@ -21,8 +24,15 @@ interface Props {
   showPlayerSelect?: boolean;
   historyNotice?: string;
   currentTeam?: string;
+  slipLegs: SlipLeg[];
+  slipFull: boolean;
+  onAddLeg: (side: Side, origin: HTMLElement) => void;
+  onOpenSlip: () => void;
 }
-export default function ForecastPanel({ form, onChange, players, playersLoading, applied, busy, dirty, error, onRun, onRevert, onValidation, onData, showPlayerSelect = true, historyNotice = '', currentTeam }: Props) {
+
+const statUnits: Record<Stat, string> = { points: 'pts', rebounds: 'reb', assists: 'ast', steals: 'stl', blocks: 'blk' };
+
+export default function ForecastPanel({ form, onChange, players, playersLoading, applied, busy, dirty, error, onRun, onRevert, onValidation, onData, showPlayerSelect = true, historyNotice = '', currentTeam, slipLegs, slipFull, onAddLeg, onOpenSlip }: Props) {
   const change = <K extends keyof ForecastForm>(key: K, value: ForecastForm[K]) => onChange({ ...form, [key]: value });
   const player = players.find(item => item.id === form.player_id);
   const forecast = applied?.data;
@@ -73,20 +83,21 @@ export default function ForecastPanel({ form, onChange, players, playersLoading,
       {player && player.games < 10 ? `${player.games} completed games are available; at least 10 are required. You can still inspect the player's profile, career and every available game.` : players.length ? 'Choose a statistic and a line. Run a forecast to explore a full probability distribution—not just a point estimate.' : 'Choose a current NBA player above. A valid roster player can have no completed games in the selected window.'}
     </EmptyState></div>}
     {forecast && applied && <div className="forecast-results enter" aria-busy={busy}>
-      <div className="applied-heading"><div className="player-identity"><div className="player-monogram" aria-hidden="true">{forecast.player.name.split(' ').map(part => part.charAt(0)).slice(0, 2).join('')}</div><div><div className="eyebrow">APPLIED FORECAST <span className="slash">/</span> {sourceLabel(forecast.dataset.source)}</div><h2>{forecast.player.name}<span title={currentTeam ? 'Current roster team' : 'Latest historical team'}>{currentTeam ?? forecast.player.team}</span></h2></div></div>
+      <div className="applied-heading"><div className="player-identity"><Jersey className="player-jersey" label={forecast.player.name.split(' ').map(part => part.charAt(0)).slice(0, 2).join('').toLocaleUpperCase()} /><div><div className="eyebrow">APPLIED FORECAST <span className="slash">/</span> {sourceLabel(forecast.dataset.source)}</div><h2>{forecast.player.name}<span title={currentTeam ? 'Current roster team' : 'Latest historical team'}>{currentTeam ?? forecast.player.team}</span></h2></div></div>
         <div className="applied-actions"><span className="pill">{statNames[forecast.stat]} · {forecast.sample_size} games</span><button className="icon-button" title="Download applied forecast as JSON" aria-label="Download applied forecast as JSON" onClick={() => downloadJson({ ...applied, exported_at: new Date().toISOString(), note: 'Research only. Not a wagering recommendation.' }, `courtside-${forecast.player.id}-${forecast.stat}-forecast.json`)}><ArrowDownToLine size={17} /></button></div>
       </div>
       {busy && <div className="updating-bar"><Busy text="Updating forecast. Previous applied results remain below." /></div>}
       {forecast.warnings.length > 0 && <div className="notice warning-notice" role="status"><TriangleAlert size={18} aria-hidden="true" /><div><strong>Keep the limitations in view</strong>{forecast.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       <div className="metrics-grid">
-        <StatCard label="PROJECTED AVERAGE" value={decimal(forecast.summary.mean)} unit={forecast.stat === 'points' ? 'pts' : forecast.stat.slice(0, 3)} detail={<><span>{pct(forecast.interval.coverage, 0)} predictive interval</span><strong>{decimal(forecast.interval.low, 0)}—{decimal(forecast.interval.high, 0)} <span>{forecast.stat}</span></strong></>} />
+        <StatCard label="PROJECTED AVERAGE" value={decimal(forecast.summary.mean)} unit={statUnits[forecast.stat]} detail={<><span>{pct(forecast.interval.coverage, 0)} predictive interval</span><strong>{decimal(forecast.interval.low, 0)}—{decimal(forecast.interval.high, 0)} <span>{forecast.stat}</span></strong></>} />
         <StatCard label={`OVER ${forecast.line}`} value={<>{decimal(forecast.probabilities.over * 100)}<span>%</span></>} accent detail={<><span>Model probability</span><strong>Strictly above the line <ArrowRight size={15} /></strong></>} />
         <StatCard label={`UNDER ${forecast.line}`} value={<>{decimal(forecast.probabilities.under * 100)}<span>%</span></>} detail={<><span>Model probability</span><strong>Strictly below the line</strong></>} />
         <StatCard label="OVER · NO-VIG EDGE" value={edgePoints(forecast.market.edge_over, false)} unit={forecast.market.edge_over === null ? undefined : 'pp'} detail={<><span>Model vs. normalized market</span><strong>{forecast.market.edge_over === null ? 'Undefined: all outcomes push' : 'Conditional on no push'} <CircleHelp size={14} aria-hidden="true" /></strong></>} />
       </div>
       <div className="forecast-caption"><span><Info size={14} /><strong>Push {pct(forecast.probabilities.push)}</strong> · exactly {forecast.line}, stake returned</span><span>{modelNames[forecast.resolved_model]}{forecast.model === 'auto' ? ' · auto-selected' : ''} <span className="slash">/</span> Predictive range ≠ chance of winning</span></div>
+      <ForecastParlayActions applied={applied} legs={slipLegs} full={slipFull} dirty={dirty} onAdd={onAddLeg} onOpenSlip={onOpenSlip} />
       <div className="two-column chart-grid-layout">
-        <article className="card chart-card"><SectionHeading eyebrow="THE FULL PICTURE" title="A range, not a promise"><span className="pill">{modelNames[forecast.resolved_model]}</span></SectionHeading><DistributionChart forecast={forecast} /><p className="chart-footnote">Modeled probability of each {forecast.stat} outcome. Rose marks outcomes above {forecast.line}.</p></article>
+        <article className="card chart-card"><SectionHeading eyebrow="THE FULL PICTURE" title="A range, not a promise"><span className="pill">{modelNames[forecast.resolved_model]}</span></SectionHeading><DistributionChart forecast={forecast} /><p className="chart-footnote">Modeled probability of each {forecast.stat} outcome. Orange marks outcomes above {forecast.line}.</p></article>
         <article className="card chart-card"><SectionHeading eyebrow="THE RECENT RECORD" title="Game by game"><span className="mono subtle">n = {forecast.sample_size}</span></SectionHeading><RecentGamesChart forecast={forecast} /><p className="chart-footnote">Actual rows from {sourceLabel(forecast.dataset.source).toLowerCase()}. The dashed line is today’s research scenario—not historical market lines.</p></article>
       </div>
       <div className="two-column analysis-grid">
@@ -95,7 +106,7 @@ export default function ForecastPanel({ form, onChange, players, playersLoading,
           {forecast.market.model_over_conditional === null
             ? <p className="conditional-unavailable">No conditional comparison: all modeled outcomes push. N/A is not a 0% probability or zero edge.</p>
             : <div className="comparison-track" role="img" aria-label={`Model conditional over probability ${pct(forecast.market.model_over_conditional)}, no-vig market ${pct(forecast.market.no_vig_over)}`}><span style={{ width: pct(Math.min(1, Math.max(0, forecast.market.model_over_conditional))) }} /><i style={{ left: pct(Math.min(1, Math.max(0, forecast.market.no_vig_over))) }} /></div>}
-          <div className="table-scroll"><table className="data-table market-table"><thead><tr><th>Side / odds</th><th>Implied</th><th>No-vig</th><th>Edge</th><th>Exp. ROI</th></tr></thead><tbody>
+          <div className="table-scroll" tabIndex={0} role="region" aria-label="Model versus market by side"><table className="data-table market-table"><thead><tr><th>Side / odds</th><th>Implied</th><th>No-vig</th><th>Edge</th><th>Exp. ROI</th></tr></thead><tbody>
             <tr><td><strong>Over</strong> <span className="subtle mono">{odds(applied.request.odds_over)}</span></td><td>{pct(forecast.market.over_implied)}</td><td>{pct(forecast.market.no_vig_over)}</td><td>{edgePoints(forecast.market.edge_over)}</td><td>{signed(forecast.market.expected_roi_over * 100)}%</td></tr>
             <tr><td><strong>Under</strong> <span className="subtle mono">{odds(applied.request.odds_under)}</span></td><td>{pct(forecast.market.under_implied)}</td><td>{pct(forecast.market.no_vig_under)}</td><td>{edgePoints(forecast.market.edge_under)}</td><td>{signed(forecast.market.expected_roi_under * 100)}%</td></tr>
           </tbody></table></div>
@@ -109,8 +120,8 @@ export default function ForecastPanel({ form, onChange, players, playersLoading,
         </article>
       </div>
       <article className="card model-table-card"><SectionHeading eyebrow="DON’T TRUST JUST ONE LENS" title="The model bench"><span className="subtle">Same sample. Different assumptions.</span></SectionHeading>
-        <div className="table-scroll"><table className="data-table"><thead><tr><th>Distribution</th><th>Projected mean</th><th>Over {forecast.line}</th><th>Under {forecast.line}</th><th>Push</th><th>Role</th></tr></thead><tbody>{forecast.comparisons.map(comparison => <tr key={comparison.model} className={comparison.model === forecast.resolved_model ? 'selected-row' : ''}>
-          <td><span className={`model-dot ${comparison.model === forecast.resolved_model ? 'rose-dot' : 'neutral-dot'}`} /><strong>{modelNames[comparison.model]}</strong></td><td>{decimal(comparison.mean)}</td><td>{pct(comparison.over)}</td><td>{pct(comparison.under)}</td><td>{pct(comparison.push)}</td><td>{comparison.model === forecast.resolved_model ? <span className="pill rose-pill">Applied model</span> : <span className="subtle">Sensitivity check</span>}</td>
+        <div className="table-scroll" tabIndex={0} role="region" aria-label="Model bench"><table className="data-table"><thead><tr><th>Distribution</th><th>Projected mean</th><th>Over {forecast.line}</th><th>Under {forecast.line}</th><th>Push</th><th>Role</th></tr></thead><tbody>{forecast.comparisons.map(comparison => <tr key={comparison.model} className={comparison.model === forecast.resolved_model ? 'selected-row' : ''}>
+          <td><span className={`model-dot ${comparison.model === forecast.resolved_model ? 'accent-dot' : 'muted-dot'}`} /><strong>{modelNames[comparison.model]}</strong></td><td>{decimal(comparison.mean)}</td><td>{pct(comparison.over)}</td><td>{pct(comparison.under)}</td><td>{pct(comparison.push)}</td><td>{comparison.model === forecast.resolved_model ? <span className="pill accent-pill">Applied model</span> : <span className="subtle">Sensitivity check</span>}</td>
         </tr>)}</tbody></table></div><p className="chart-footnote">Agreement is not validation. Evaluate forecasts on later, unseen game rows before interpreting these probabilities.</p>
       </article>
       <div className="validation-cta"><div className="cta-icon"><Sparkles size={23} /></div><div><span className="eyebrow">THE NEXT QUESTION</span><h3>Does the model hold up out of sample?</h3><p>Walk forward through history. Inspect calibration, not a made-up win rate.</p></div><button className="secondary-button" onClick={onValidation}>Test the evidence <ArrowRight size={16} /></button></div>

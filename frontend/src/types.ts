@@ -1,6 +1,6 @@
 export type Stat = 'points' | 'rebounds' | 'assists' | 'steals' | 'blocks';
 export type Model = 'auto' | 'empirical' | 'normal' | 'poisson' | 'negative_binomial';
-export type View = 'forecast' | 'player' | 'validation' | 'notebook' | 'data' | 'methodology';
+export type View = 'forecast' | 'parlay' | 'player' | 'validation' | 'notebook' | 'data' | 'methodology';
 export interface NBAHistoryQuery {
   player_ids: string[];
   season: string;

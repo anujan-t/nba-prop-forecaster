@@ -1,6 +1,20 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import '@fontsource/barlow/400.css';
+import '@fontsource/barlow/500.css';
+import '@fontsource/barlow/600.css';
+import '@fontsource/barlow/700.css';
+import '@fontsource/barlow-condensed/600.css';
+import '@fontsource/barlow-condensed/700.css';
+import '@fontsource/barlow-condensed/800.css';
+import '@fontsource/chakra-petch/600.css';
+import '@fontsource/chakra-petch/700.css';
+import '@fontsource/graduate/latin-400.css';
 import App from './App';
 import './styles.css';
+import './views.css';
+import './league.css';
+import './parlay.css';
+import './motion.css';
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);

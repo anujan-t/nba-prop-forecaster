@@ -171,11 +171,35 @@ LINE MOVEMENT
   Manual timestamped snapshots only, separated by dataset/player/stat/game
   date/book. No sportsbook scraping, paid API or automatic wagering.
 
+PARLAY BUILDER
+  Combine 1-10 legs (player, stat, line, over/under). Each player+stat pair
+  may appear once. Each leg uses exactly the Forecast lab model and settings.
+  Linked legs (same player, or players whose latest game was for the same
+  team) are joined with a Gaussian copula:
+    - Spearman rank correlation over shared games: each player's last 30
+      games (or a longer lookback), matched on date and team for teammates.
+    - Latent correlation = 2*sin(pi*rho_s/6), shrunk by n/(n+10) toward
+      zero, capped at +/-0.95. Fewer than 10 shared games, or a constant
+      stat, means no linkage is assumed. Over legs flip the latent sign.
+    - The joint win probability is the multivariate normal orthant
+      probability (Genz algorithm, fixed seed), bounded by the Frechet
+      limits; an invalid correlation matrix is repaired by eigenvalue
+      clipping and reported.
+  Players on different current teams are treated as independent, even if
+  they meet in the same game (head-to-head linkage is not modelled).
+  A push counts as not winning. When a whole-number line can push, the
+  no-loss probability (every leg wins or pushes) is shown separately, and
+  the expected return against entered parlay odds treats a push as a loss.
+  The slip also reports how often every linked leg actually won together
+  in shared past games, as a check on the model. Fair odds = 1/probability.
+  Research only: probabilities, not certainties; no wagering is automated.
+
 PROJECT STATUS
   Implemented: synthetic pipeline; models; odds; calibration/Brier scoring;
   scenario features; complete current-roster discovery; current player
   profiles; detailed box scores/splits/shooting; career history; direct NBA
-  history with cache/refresh; legacy CSV support; persistent line tracking.
+  history with cache/refresh; legacy CSV support; persistent line tracking;
+  correlation-aware parlay builder.
   Primary endpoints:
     GET /api/nba/roster
     GET /api/nba/players?search=<name> (all current matches, no result cap)
@@ -183,6 +207,10 @@ PROJECT STATUS
     GET /api/nba/players/{id}/career
     POST /api/nba/player-history
       {player_id, window:"recent" or "2025-26", season_type, refresh:false}
+    POST /api/parlay
+      {legs:[{dataset_id, player_id, stat, line, side:"over"|"under",
+              model, lookback, expected_minutes, rest_days, opponent,
+              use_context}], book_odds: American odds or null}
   Profiles and careers have independent source/fetched-at metadata.
   Player history returns ready, limited or empty, plus history metadata,
   summary, all games, splits, queried seasons and warnings.

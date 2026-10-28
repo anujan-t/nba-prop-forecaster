@@ -19,6 +19,7 @@ from .data import STATS, Store, demo_frame, nba_cache_fresh, nba_cache_id, playe
 from .engine import american_probability, backtest, forecast
 from .nba import NBAUnavailableError, NoGamesError, import_game_logs, normalize_name, search_players, static_player_ids
 from .league import current_season, fetch_career, fetch_profile, fetch_roster, previous_season, summarize_history
+from .parlay import MAX_LEGS, LegNotFound, price_parlay
 
 ROOT = Path(__file__).resolve().parent.parent
 Stat = Literal["points", "rebounds", "assists", "steals", "blocks"]
@@ -111,6 +112,35 @@ class PlayerHistoryRequest(StrictModel):
                 raise ValueError("Use 'recent' or an NBA season such as 2025-26.")
             NBARequest.validate_season(value)
         return value
+
+
+class ParlayLeg(StrictModel):
+    dataset_id: str = Field(min_length=1, max_length=80)
+    player_id: str = Field(min_length=1, max_length=80)
+    stat: Stat
+    line: float = Field(ge=0, le=200)
+    side: Literal["over", "under"]
+    model: Model = "auto"
+    lookback: int = Field(default=30, ge=10, le=82)
+    expected_minutes: float | None = Field(default=None, ge=1, le=60)
+    rest_days: int | None = Field(default=None, ge=0, le=30)
+    opponent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,5}$")
+    use_context: bool = True
+
+    @field_validator("line")
+    @classmethod
+    def validate_line(cls, value: float) -> float:
+        return ForecastRequest.validate_line(value)
+
+
+class ParlayRequest(StrictModel):
+    legs: list[ParlayLeg] = Field(min_length=1, max_length=MAX_LEGS)
+    book_odds: int | None = None
+
+    @field_validator("book_odds")
+    @classmethod
+    def validate_odds(cls, value: int | None) -> int | None:
+        return value if value is None else ForecastRequest.validate_odds(value)
 
 
 class LineRequest(StrictModel):
@@ -221,6 +251,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         frame, _ = load(body.dataset_id)
         try:
             return backtest(frame, body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/parlay")
+    def run_parlay(body: ParlayRequest):
+        try:
+            return price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load)
+        except LegNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
