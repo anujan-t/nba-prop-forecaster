@@ -1,0 +1,194 @@
+COURTSIDE / NBA PLAYER PROP FORECASTER
+===================================
+
+A local research application, not a betting service or financial advice.
+Synthetic samples are not real NBA results. No accuracy or profit guarantee.
+
+DIRECT NBA DATA (DEFAULT APPLICATION WORKFLOW)
+  The main selector loads NBA's complete current roster from CommonAllPlayers.
+  Search by name or team, optionally filter by franchise, and choose any
+  player. There is no five-player or 25-result discovery limit. Players do
+  not need prior appearances to be listed, and new rookie IDs need not exist
+  in nba_api's bundled static directory.
+  Profiles, career records and game history load automatically on selection.
+  The default Recent window explicitly pools current + previous NBA seasons.
+  Choose a single season or Playoffs when that is the intended study.
+  No CSV, separate import step or API key is required. Saved history is a
+  cache of past studies, not a limit on league coverage.
+
+  The roster is the provider's roster-status=1 snapshot, with a visible
+  fetched-at timestamp and a Refresh roster control. Missing franchises or
+  ambiguous roster rows produce an error rather than a false full-league
+  claim. Roster membership does not mean injury-free or available to play.
+
+  Open Player intel for current team, position, jersey, age, height/weight,
+  draft and school/country information; per-game averages and shooting;
+  last-5/10/20, season, home/away and opponent splits; complete game logs;
+  and regular-season/playoff career records. Full box score exposes shot
+  attempts, threes, turnovers, rebounds, fouls, +/- and source identifiers.
+  Every returned game is accessible using 25-row pagination.
+  Unknown optional data and zero-attempt shooting rates remain unknown,
+  not fabricated zeros. Career TOT rows are counted once for traded players.
+  Shooting percentages are total makes / total attempts, not mean rates.
+
+  Provider: NBA Stats endpoints at stats.nba.com via the community-maintained
+  nba_api client (https://github.com/swar/nba_api). This is not a supported
+  NBA commercial API contract. Public endpoints can change, time out or
+  block requests. No HTML scraping or access-control bypass is used.
+
+  Responses go directly from the API into validated game records and a
+  local SQLite JSON-record cache. The NBA workflow never serializes or
+  parses CSV. Loading the same player, history window and game type reuses a
+  response fetched within six hours; older responses are fetched again.
+  "Refresh player" requests the profile, career and active history again. Refresh
+  replaces the same history ID, preserving notebook entries. Failed
+  refreshes show an error and leave previously saved data untouched.
+  Selecting an already saved history does not contact the API; its actual
+  fetched-at time is displayed. No scheduled background sync is implied.
+
+  Completed games only, not live odds or injury reports. At least 10 games
+  are needed for a forecast and 16 for walk-forward evaluation. A new
+  season or a player with limited appearances may not meet that threshold.
+  Such players remain fully selectable, with all available profile and
+  game information. No-games and limited-sample states do not manufacture
+  forecasts. The app does not request seasons before a listed NBA debut.
+  A failed profile, career or game request is reported independently; it
+  does not hide other successfully retrieved sections.
+
+START (Windows PowerShell)
+  .\Start.ps1
+
+For a fresh GitHub clone, complete FROM SOURCE / FRONTEND DEVELOPMENT below
+before starting the app. Built frontend assets are not committed.
+
+Open http://127.0.0.1:8765 after "Application startup complete".
+The first start creates a Python virtual environment and installs requirements.
+Prerequisites: Python 3.12+. A prebuilt frontend is included in this local copy.
+Start.ps1 also accepts -Python <existing-python.exe> and -Port <port>.
+Keep the terminal open. Ctrl+C stops the server.
+
+FROM SOURCE / FRONTEND DEVELOPMENT
+  python -m venv .venv
+  .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+  cd frontend
+  npm ci
+  npm run build
+  cd ..
+  .\Start.ps1
+
+Node.js 22 LTS is recommended for builds; Node is not needed to serve an
+already-built frontend. The Vite dev server proxies /api to port 8765.
+For dependency versions used in the delivered app see requirements-lock.txt
+and frontend/package-lock.json.
+
+MODEL / API TESTS
+  .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+
+DEVELOPMENT / LEGACY CLI (OPTIONAL, NOT THE APPLICATION'S DATA SOURCE)
+  .\.venv\Scripts\python.exe -m backend.cli demo --output data\sample_games.csv
+  .\.venv\Scripts\python.exe -m backend.cli forecast --player 203999 --stat points --line 26.5
+  .\.venv\Scripts\python.exe -m backend.cli backtest --player 203999 --stat steals --line 1.5 --model poisson
+  Add --csv <file> to use your data, or --output <file.json> to save results.
+
+API reference: http://127.0.0.1:8765/docs
+
+DATA AND PRIVACY
+  864 seeded synthetic player-games, 12 illustrative named players, five
+  count statistics: points, rebounds, assists, steals and blocks.
+  Seed: 20261027. Player names/teams in this fixture are illustrative, not
+  evidence that a player produced these statistics or played for that team.
+  NBA history is the primary data source. The service may time out or be
+  blocked by NBA Stats. Failures are reported, never silently replaced by
+  synthetic data. No live injury/lineup/odds feeds are included.
+  The old CSV endpoints and developer CLI remain for backward compatibility
+  but CSV controls are removed from the application. Existing saved data is
+  preserved and migrated once to native records; the legacy datasets table
+  is retained as a backup, not used for ongoing forecasting.
+  Legacy CSV imports stay local. Exporting the example CSV and reimporting it does
+  not turn it into real data; CSV provenance is always user-supplied.
+  Required columns:
+    date,player_id,player_name,team,opponent,minutes,points,rebounds,
+    assists,steals,blocks
+  Optional: home (true/false, blank or omitted means unknown); season,
+  game_id, win, field_goals_made/attempted, three_pointers_made/attempted,
+  free_throws_made/attempted, offensive_rebounds, defensive_rebounds,
+  turnovers, fouls, plus_minus. The NBA endpoint supplies these directly.
+  Rest days are derived chronologically.
+  Dates must be YYYY-MM-DD. Exclude DNPs (minutes must be positive).
+  Limits: 5 MB and 50,000 rows. Duplicate player/date rows are rejected.
+  Native game history and snapshots persist in runtime\courtside.sqlite3.
+  Override storage with NBA_DATA_DIR. runtime/ is excluded from source control.
+  Local-only server; do not expose it publicly without authentication,
+  resource limits, monitoring and a production deployment design.
+
+MATHEMATICS
+  Empirical: frequency distribution of trailing observed integer totals.
+  Normal: discretized at half-count boundaries and truncated below -0.5.
+  Poisson: estimated rate equals trailing mean; assumes variance = mean.
+  Negative binomial: moment-matched mean and excess variance; uses the
+  Poisson limit when excess variance cannot be estimated.
+  Auto: normal for points/rebounds/assists. For steals/blocks, selects
+  negative binomial if observed variance > 1.5 * mean, otherwise Poisson.
+  This is an explicit heuristic, not automated validated model selection.
+  Context: minutes scaling plus historical per-minute rates for rest
+  (0, 1, 2, 3+ days) and opponent, shrunk with a 12-game prior weight.
+  Rest/opponent factors are each capped at +/-20%. They are not causal
+  estimates and do not incorporate injuries or confirmed starting lineups.
+  Minutes scenarios outside 10%-300% of trailing minutes are rejected.
+  Empirical scenario scaling rounds counts to the nearest integer.
+  Game outcomes model the player appearing, not DNP/void-settlement rules.
+
+  American odds: positive a -> 100/(a+100); negative a -> |a|/(|a|+100).
+  No-vig: divide each implied probability by their two-sided sum.
+  Over = P(X > line); under = P(X < line); push = P(X = line).
+  On integer lines, compare model and no-vig probabilities conditional on
+  no push. All-push model edges are undefined, not zero.
+  Expected net return per unit = P(win)*decimal_profit - P(loss).
+  A push returns the stake and contributes zero net return.
+  Displayed 80% intervals are predictive ranges, not confidence in winning.
+  Distribution charts omit at most 0.05% of upper-tail mass.
+
+EVALUATION
+  Walk-forward: start after 15 games; train only on older rows. The
+  lookback is 10-82 games. No random train/test split or future game leakage.
+  Historical target-game minutes are NEVER used as a predictive input.
+  Rest and opponent come from the schedule; minutes use the trailing mean.
+  A line is either fixed by the user or generated as prior median rounded
+  down plus 0.5. Neither mode represents archived sportsbook market lines.
+  Pushes are excluded; scoring uses conditional settled probabilities.
+  A 1e-6 symmetric prior handles degenerate all-push predictions.
+  Brier = mean((probability - outcome)^2); lower is better.
+  Baseline is constant 50% (Brier 0.25). Skill = 1 - model_Brier / 0.25.
+  Log loss clips probabilities to [1e-6, 1-1e-6].
+  Calibration buckets show mean predicted versus observed over frequency
+  and sample counts. Sparse buckets should not be over-interpreted.
+  Model comparisons are exploratory; selecting a model based on these
+  scores needs a separate future holdout before claiming generalization.
+  Each backtest is limited to 5,000 evaluation games; select a single
+  player or shorter dataset for larger imports.
+
+LINE MOVEMENT
+  Manual timestamped snapshots only, separated by dataset/player/stat/game
+  date/book. No sportsbook scraping, paid API or automatic wagering.
+
+PROJECT STATUS
+  Implemented: synthetic pipeline; models; odds; calibration/Brier scoring;
+  scenario features; complete current-roster discovery; current player
+  profiles; detailed box scores/splits/shooting; career history; direct NBA
+  history with cache/refresh; legacy CSV support; persistent line tracking.
+  Primary endpoints:
+    GET /api/nba/roster
+    GET /api/nba/players?search=<name> (all current matches, no result cap)
+    GET /api/nba/players/{id}/profile
+    GET /api/nba/players/{id}/career
+    POST /api/nba/player-history
+      {player_id, window:"recent" or "2025-26", season_type, refresh:false}
+  Profiles and careers have independent source/fetched-at metadata.
+  Player history returns ready, limited or empty, plus history metadata,
+  summary, all games, splits, queried seasons and warnings.
+  Legacy /api/nba/history still accepts player_ids batches for saved
+  research studies. This batch limit is NOT a limit on player access.
+  /api/datasets/nba is a deprecated compatibility alias.
+  Future work: verified injury/minutes forecasts,
+  licensed historical odds, prospective real-data evaluation and deployment.
+  Source repository: https://github.com/anujan-t/nba-prop-forecaster
