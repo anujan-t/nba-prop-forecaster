@@ -1,9 +1,10 @@
-import { ArrowLeft, ArrowUpRight, Clapperboard, ClipboardList, ExternalLink, HeartPulse, Newspaper, RefreshCw, Repeat2, Search, Shield, Stethoscope, Users, X } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, ClipboardList, ExternalLink, HeartPulse, Newspaper, RefreshCw, Repeat2, Search, Shield, Stethoscope, Tv, Users, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { dateLabel, timeAgo } from './api';
+import { dateLabel, timeAgo, todayEastern } from './api';
 import { Busy, EmptyState, ErrorNotice, SectionHeading } from './components';
-import type { CoachEntry, Feed, Headlines, InjuryReport, NewsArticle, NewsKind, PlayType, SeasonProfile, TeamDetail, TeamMetric, TeamProfile, TeamStyles, Transaction, Transactions } from './news-types';
+import type { CoachEntry, Feed, Game, GamesFeed, Headlines, InjuryReport, NewsArticle, NewsKind, PlayType, SeasonProfile, TeamDetail, TeamMetric, TeamProfile, TeamStyles, Transaction, Transactions } from './news-types';
+import { americanLabel } from './parlay';
 import { RouteLink } from './RouteLink';
 import type { NewsSection } from './routes';
 import type { InjuryEntry } from './types';
@@ -13,12 +14,13 @@ export const kindNames: Record<NewsKind, string> = {
   injury: 'Injuries & availability', transaction: 'Roster moves', coaching: 'Coaches & front office', game: 'Games',
   betting: 'Betting & fantasy', other: 'Around the league',
 };
-const kindShort: Record<NewsKind, string> = {
+export const kindShort: Record<NewsKind, string> = {
   injury: 'Injury', transaction: 'Roster move', coaching: 'Coaching', game: 'Game', betting: 'Betting', other: 'League',
 };
-const statusNames: Record<InjuryEntry['status_key'], string> = {
+export const statusNames: Record<InjuryEntry['status_key'], string> = {
   out: 'Out', suspended: 'Suspended', doubtful: 'Doubtful', questionable: 'Questionable', day_to_day: 'Day-to-day', probable: 'Probable', other: 'Listed',
 };
+const statusOrder: InjuryEntry['status_key'][] = ['out', 'suspended', 'doubtful', 'questionable', 'day_to_day', 'probable', 'other'];
 const statusFilters: { id: 'all' | 'out' | 'uncertain' | 'day_to_day'; label: string; keys: InjuryEntry['status_key'][] }[] = [
   { id: 'all', label: 'All', keys: ['out', 'suspended', 'doubtful', 'questionable', 'day_to_day', 'probable', 'other'] },
   { id: 'out', label: 'Out', keys: ['out', 'suspended'] },
@@ -26,26 +28,36 @@ const statusFilters: { id: 'all' | 'out' | 'uncertain' | 'day_to_day'; label: st
   { id: 'day_to_day', label: 'Day-to-day', keys: ['day_to_day', 'probable', 'other'] },
 ];
 /** Opponent metrics where rank 1 means the team allows the least. */
-const allowedMetrics = ['opponent_points', 'opponent_threes', 'opponent_rebounds', 'opponent_assists', 'opponent_efg'];
+export const allowedMetrics = ['opponent_points', 'opponent_threes', 'opponent_rebounds', 'opponent_assists', 'opponent_efg'];
 const styleMetrics = ['pace', 'offense', 'defense', 'net', 'three_rate', 'paint_share', 'fast_break_share', 'assisted', 'free_throw_rate',
   'turnover_rate', 'offensive_rebounding', 'forced_turnovers'];
 
-function ordinal(value: number): string {
+export function ordinal(value: number): string {
   const suffix = value % 100 >= 11 && value % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[value % 10] ?? 'th';
   return `${value}${suffix}`;
 }
 
 /** A date with its year when it is not this year (an estimated return next July should say so). */
-function dayLabel(value: string): string {
+export function dayLabel(value: string): string {
   const year = Number(value.slice(0, 4));
   return dateLabel(value, Number.isFinite(year) && year !== new Date().getFullYear());
 }
 
-function metricValue(metric: TeamMetric): string {
+/** Shares (0–1) as "48.2%", everything else to one decimal. */
+export function metricValue(metric: Pick<TeamMetric, 'value' | 'percent'>): string {
   return metric.percent ? `${(metric.value * 100).toFixed(1)}%` : metric.value.toFixed(1);
 }
 
-export function InjuryBadge({ entry, compact = false }: { entry: InjuryEntry; compact?: boolean }) {
+/** "2 out · 1 questionable", most serious first. */
+export function injuryCounts(entries: { status_key: string }[]): string {
+  const known = (key: string): InjuryEntry['status_key'] => (statusOrder as string[]).includes(key) ? key as InjuryEntry['status_key'] : 'other';
+  return statusOrder.map(key => [key, entries.filter(entry => known(entry.status_key) === key).length] as const)
+    .filter(([, count]) => count > 0).map(([key, count]) => `${count} ${statusNames[key].toLowerCase()}`).join(' · ');
+}
+
+type BadgeEntry = Pick<InjuryEntry, 'status' | 'status_key' | 'injury'> & Partial<Pick<InjuryEntry, 'side' | 'short_comment'>>;
+
+export function InjuryBadge({ entry, compact = false }: { entry: BadgeEntry; compact?: boolean }) {
   const what = [entry.side, entry.injury].filter(Boolean).join(' ');
   return <span className={`injury-badge status-${entry.status_key}`} title={entry.short_comment ?? undefined}>
     <HeartPulse size={13} aria-hidden="true" /><strong>{statusNames[entry.status_key] ?? entry.status}</strong>{!compact && what && <span>{what}</span>}
@@ -66,11 +78,11 @@ function StaleNotice({ feed }: { feed: Feed | null }) {
   return <div className="notice warning-notice" role="status"><HeartPulse size={18} aria-hidden="true" /><div><strong>Showing the last saved copy</strong><p>{feed.error}</p></div></div>;
 }
 
-function TeamChip({ team }: { team: string }) {
+export function TeamChip({ team }: { team: string }) {
   return <RouteLink className="team-chip" to={{ page: 'news', section: 'teams', team }} aria-label={`${team} team page`}>{team}</RouteLink>;
 }
 
-function PlayerLink({ name, playerId, children }: { name: string; playerId: string | null; children?: ReactNode }) {
+export function PlayerLink({ name, playerId, children }: { name: string; playerId: string | null; children?: ReactNode }) {
   if (!playerId) return <>{children ?? name}</>;
   return <RouteLink className="player-link" to={{ page: 'players', playerId, section: 'props' }} title={`Open ${name} in Players`}>{children ?? name}</RouteLink>;
 }
@@ -121,6 +133,175 @@ function HeadlinesSection({ active, teams }: { active: boolean; teams: string[] 
     {data && !shown.length && <EmptyState title="Nothing matches these filters" icon={<Newspaper size={30} />}>Try another kind of news or all teams.</EmptyState>}
     {lead && <ArticleCard article={lead} lead />}
     <div className="news-list">{shown.filter(article => article !== lead).map(article => <ArticleCard key={article.id} article={article} />)}</div>
+  </section>;
+}
+
+// ---------- Games and lines ----------
+
+const dayMs = 86_400_000;
+const noon = (day: string) => Date.parse(`${day}T12:00:00Z`);
+
+/** The YYYY-MM-DD `days` before or after `day`. */
+function shiftDay(day: string, days: number): string {
+  const time = noon(day);
+  return Number.isNaN(time) ? day : new Date(time + days * dayMs).toISOString().slice(0, 10);
+}
+
+/** "Sat, Nov 2", or "Saturday, November 2" in full, with the year when it isn't this year. */
+function calendarDay(day: string, full = false): string {
+  const time = noon(day);
+  if (Number.isNaN(time)) return day;
+  const year = Number(day.slice(0, 4));
+  return new Date(time).toLocaleDateString('en-US', {
+    weekday: full ? 'long' : 'short', month: full ? 'long' : 'short', day: 'numeric', timeZone: 'UTC',
+    ...(year !== new Date().getFullYear() ? { year: 'numeric' } : {}),
+  });
+}
+
+function relativeDay(day: string, today: string): string | null {
+  const offset = Math.round((noon(day) - noon(today)) / dayMs);
+  return offset === 0 ? 'Today' : offset === 1 ? 'Tomorrow' : offset === -1 ? 'Yesterday' : null;
+}
+
+/** "Today", "Tomorrow", "Yesterday" or "Sat, Nov 2" for a YYYY-MM-DD game date (US Eastern). */
+export function gameDayLabel(day: string, today = todayEastern()): string {
+  return relativeDay(day, today) ?? calendarDay(day);
+}
+
+/** The game's date in US Eastern time. */
+function gameDate(game: Game): string | null {
+  if (game.date) return game.date;
+  const time = game.start ? Date.parse(game.start) : Number.NaN;
+  return Number.isNaN(time) ? null : todayEastern(new Date(time));
+}
+
+/** The tipoff in the reader's own time zone, when that isn't Eastern time. */
+function localTipoff(start: string | null): string | null {
+  const time = start ? Date.parse(start) : Number.NaN;
+  if (Number.isNaN(time)) return null;
+  const options: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const local = new Date(time).toLocaleTimeString('en-US', options);
+  return local === new Date(time).toLocaleTimeString('en-US', { ...options, timeZone: 'America/New_York' }) ? null : local;
+}
+
+/** A point spread as "−1.5", "+3" or "PK". */
+export function spreadLine(value: number): string {
+  return value === 0 ? 'PK' : `${value > 0 ? '+' : '−'}${Math.abs(value)}`;
+}
+
+function priceLabel(value: number | null): string | null {
+  return value === null || !Number.isFinite(value) || value === 0 ? null : americanLabel(value);
+}
+
+function Line({ children, odds }: { children: ReactNode; odds?: string | null }) {
+  return <span className="game-line"><span>{children}</span>{odds && <small>{odds}</small>}</span>;
+}
+
+/** The sportsbook line ESPN lists (spread, total, moneyline), away team first. Shown for reference only. */
+export function GameLines({ game, showProvider = true }: { game: Game; showProvider?: boolean }) {
+  const { odds, away, home } = game;
+  if (!odds) return null;
+  const homeSpread = odds.home_spread ?? (odds.away_spread !== null ? -odds.away_spread : null);
+  const awaySpread = odds.away_spread ?? (odds.home_spread !== null ? -odds.home_spread : null);
+  const rows = [
+    { side: away, spread: awaySpread, spreadOdds: odds.away_spread_odds, total: 'Over', totalOdds: odds.over_odds, moneyline: priceLabel(odds.away_moneyline) },
+    { side: home, spread: homeSpread, spreadOdds: odds.home_spread_odds, total: 'Under', totalOdds: odds.under_odds, moneyline: priceLabel(odds.home_moneyline) },
+  ];
+  return <div className="game-odds">
+    <table className="game-lines">
+      <caption className="sr-only">Lines, {away.name} at {home.name}</caption>
+      <thead><tr><th scope="col"><span className="sr-only">Team</span></th><th scope="col">Spread</th><th scope="col">Total</th><th scope="col">Moneyline</th></tr></thead>
+      <tbody>{rows.map(row => <tr key={row.side.team}>
+        <th scope="row">{row.side.team}</th>
+        <td>{row.spread !== null ? <Line odds={priceLabel(row.spreadOdds)}>{spreadLine(row.spread)}</Line> : '—'}</td>
+        <td>{odds.total !== null ? <Line odds={priceLabel(row.totalOdds)}><span aria-hidden="true">{row.total.charAt(0)}</span><span className="sr-only">{row.total}</span> {odds.total}</Line> : '—'}</td>
+        <td>{row.moneyline ? <Line>{row.moneyline}</Line> : '—'}</td>
+      </tr>)}</tbody>
+    </table>
+    {(homeSpread === null || awaySpread === null) && odds.details && <p className="game-provider">Line: {odds.details}</p>}
+    {showProvider && <p className="game-provider">Lines: {odds.provider ?? 'the listed sportsbook'}, for reference</p>}
+  </div>;
+}
+
+function GameStatus({ game, showDate }: { game: Game; showDate: boolean }) {
+  const day = showDate ? gameDate(game) : null;
+  const when = day ? `${gameDayLabel(day)} · ` : '';
+  if (game.state === 'in') return <span className="game-state live"><span className="live-dot" aria-hidden="true" />Live{game.detail && <span className="game-clock">{game.detail}</span>}</span>;
+  if (game.state === 'post') return <span className="game-state">{when}{game.detail ?? 'Final'}</span>;
+  const local = game.tipoff ? localTipoff(game.start) : null;
+  return <span className="game-state">
+    <time dateTime={game.start ?? undefined}>{when}{game.tipoff ?? game.detail ?? 'Time TBD'}</time>{local && <small>{local} your time</small>}
+  </span>;
+}
+
+function GameInjuries({ game, injuries }: { game: Game; injuries: Record<string, InjuryEntry[]> }) {
+  const listed = [game.away, game.home].map(side => ({ side, entries: injuries[side.team] ?? [] })).filter(item => item.entries.length > 0);
+  if (!listed.length) return null;
+  return <div className="game-injuries">{listed.map(({ side, entries }) => <details key={side.team} className="game-injury">
+    <summary><HeartPulse size={13} aria-hidden="true" /><strong>{side.team}</strong> <span>{injuryCounts(entries)}</span></summary>
+    <ul>{entries.map(entry => <li key={`${entry.player}-${entry.status_key}`}>
+      <PlayerLink name={entry.player} playerId={entry.player_id} />
+      <InjuryBadge entry={entry} compact />
+      {(entry.side || entry.injury) && <small>{[entry.side, entry.injury].filter(Boolean).join(' ')}</small>}
+    </li>)}</ul>
+  </details>)}</div>;
+}
+
+/** One game: away @ home with records, the tipoff, live score or final, the listed lines and, optionally, who's hurt. */
+export function GameCard({ game, injuries, compact = false, showDate = false, showProvider = true }: {
+  game: Game; injuries?: Record<string, InjuryEntry[]>; compact?: boolean; showDate?: boolean; showProvider?: boolean;
+}) {
+  const sides = [{ side: game.away, where: 'Away' }, { side: game.home, where: 'Home' }];
+  const scored = game.state !== 'pre' && sides.some(({ side }) => side.score !== null);
+  const decided = game.state === 'post' && sides.some(({ side }) => side.winner === true);
+  return <article className={`game-card state-${game.state}${compact ? ' compact' : ''}`} aria-label={`${game.away.name} at ${game.home.name}`}>
+    <div className="game-top">
+      <GameStatus game={game} showDate={showDate} />
+      {game.note && <span className="game-note">{game.note}</span>}
+    </div>
+    <ul className="game-sides">{sides.map(({ side, where }, index) => {
+      const won = decided && side.winner === true;
+      return <li key={where} className={decided ? (won ? 'winner' : 'loser') : undefined}>
+        <span className="game-at" aria-hidden="true">{index === 1 ? '@' : ''}</span>
+        <span className="sr-only">{where}: </span>
+        <TeamChip team={side.team} />
+        <span className="game-team-name"><span>{side.name}</span>{side.record && <small>{side.record}</small>}</span>
+        {scored && <span className="game-score">{side.score ?? '–'}{won && <span className="sr-only">, won</span>}</span>}
+      </li>;
+    })}</ul>
+    {game.state === 'pre' && (game.odds ? <GameLines game={game} showProvider={showProvider} /> : <p className="game-no-lines">No lines posted yet</p>)}
+    {game.broadcast && <p className="game-broadcast"><Tv size={14} aria-hidden="true" /><span className="sr-only">On TV: </span>{game.broadcast}</p>}
+    {injuries && <GameInjuries game={game} injuries={injuries} />}
+  </article>;
+}
+
+function GamesSection({ active }: { active: boolean }) {
+  const [day, setDay] = useState<string | null>(null); // null: today, as the server counts it
+  const feed = useFeed<GamesFeed>(day ? `/api/news/games?day=${day}` : '/api/news/games', active);
+  const data = feed.data;
+  const today = data?.today ?? todayEastern();
+  const shown = day ?? data?.date ?? today;
+  const pick = (next: string) => setDay(next === today ? null : next);
+  const relative = relativeDay(shown, today);
+  const full = calendarDay(shown, true);
+  const games = data?.games ?? [];
+  return <section className="card news-panel" aria-labelledby="news-games-title">
+    <SectionHeading id="news-games-title" eyebrow="THE SLATE" title="Games and lines"><CalendarDays size={21} className="subtle" aria-hidden="true" /></SectionHeading>
+    <div className="games-bar">
+      <p className="games-day" aria-live="polite"><CalendarDays size={18} aria-hidden="true" /><strong>{relative ?? full}</strong>{relative && <span>{full}</span>}</p>
+      <div className="games-nav" role="group" aria-label="Change the day">
+        <button type="button" className="secondary-button small-button" onClick={() => pick(shiftDay(shown, -1))}><ChevronLeft size={16} aria-hidden="true" />Previous</button>
+        <button type="button" className="secondary-button small-button" onClick={() => setDay(null)} aria-disabled={shown === today || undefined}>Today</button>
+        <button type="button" className="secondary-button small-button" onClick={() => pick(shiftDay(shown, 1))}>Next<ChevronRight size={16} aria-hidden="true" /></button>
+      </div>
+    </div>
+    <FeedMeta feed={data} loading={feed.loading} onRefresh={() => feed.refresh(true)} label="games" />
+    <StaleNotice feed={data} />
+    {feed.error && <ErrorNotice message={feed.error} onRetry={() => feed.refresh()} />}
+    {!data && feed.loading && <Busy text="Checking the schedule…" />}
+    {data && !games.length && <EmptyState title="No games on this date" icon={<CalendarDays size={30} />}>Try the previous or next day.</EmptyState>}
+    {games.length > 0 && <ul className="game-grid">{games.map(game => <li key={game.id}><GameCard game={game} injuries={data?.injuries} /></li>)}</ul>}
+    <p className="news-footnote">Lines are the sportsbook ESPN lists (e.g. DraftKings), shown for reference; COURTSIDE models player props, not sides or totals.</p>
   </section>;
 }
 
@@ -285,6 +466,15 @@ function MovesList({ items }: { items: Transaction[] }) {
   </li>)}</ul>;
 }
 
+function NextGame({ game, team }: { game: Game; team: string }) {
+  const home = game.home.team === team;
+  const opponent = home ? game.away : game.home;
+  return <section className="card next-game" aria-labelledby="team-next-title">
+    <SectionHeading id="team-next-title" eyebrow={game.state === 'in' ? 'LIVE NOW' : 'NEXT GAME'} title={`${home ? 'vs' : 'at'} ${opponent.name}`}><CalendarDays size={20} className="subtle" aria-hidden="true" /></SectionHeading>
+    <GameCard game={game} showDate />
+  </section>;
+}
+
 function TeamDetailView({ code, active }: { code: string; active: boolean }) {
   const feed = useFeed<TeamDetail>(`/api/news/teams/${code.toLowerCase()}`, active);
   const [season, setSeason] = useState<Season>('current');
@@ -302,11 +492,12 @@ function TeamDetailView({ code, active }: { code: string; active: boolean }) {
         <div>
           <span className="eyebrow">SCOUTING REPORT</span>
           <h2 id="team-detail-title">{data.team.name}</h2>
-          <p>{record ? `${record.wins}–${record.losses} in ${record.season}` : ''}{head ? ` · Head coach ${head.name}` : ''}{data.injuries.length ? ` · ${data.injuries.length} on the injury report` : ''}</p>
+          <p>{record ? `${record.wins}–${record.losses} in ${record.season}` : ''}{data.conference ? ` · ${data.conference}ern Conference` : ''}{head ? ` · Head coach ${head.name}` : ''}{data.injuries.length ? ` · ${data.injuries.length} on the injury report` : ''}</p>
         </div>
         <button type="button" className="text-button" onClick={() => feed.refresh(true)} aria-disabled={feed.loading || undefined}><RefreshCw size={14} aria-hidden="true" className={feed.loading ? 'spin' : ''} />Refresh</button>
       </section>
       {data.errors.length > 0 && <div className="notice warning-notice"><HeartPulse size={18} aria-hidden="true" /><div><strong>Some sections couldn't load</strong>{data.errors.map(error => <p key={error}>{error}</p>)}</div></div>}
+      {data.next_game && <NextGame game={data.next_game} team={data.team.abbreviation} />}
       <div className="team-detail-grid">
         <section className="card" aria-labelledby="team-style-title">
           <SectionHeading id="team-style-title" eyebrow="HOW THEY PLAY" title="Playing style"><SeasonToggle season={season} onSeason={setSeason} label="Style season" /></SectionHeading>
@@ -371,6 +562,7 @@ function MovesSection({ active, teams }: { active: boolean; teams: string[] }) {
 
 export const newsTabs: { id: NewsSection; label: string; icon: ReactNode }[] = [
   { id: 'headlines', label: 'Headlines', icon: <Newspaper size={16} aria-hidden="true" /> },
+  { id: 'games', label: 'Games', icon: <CalendarDays size={16} aria-hidden="true" /> },
   { id: 'injuries', label: 'Injury report', icon: <Stethoscope size={16} aria-hidden="true" /> },
   { id: 'teams', label: 'Teams & coaches', icon: <Shield size={16} aria-hidden="true" /> },
   { id: 'moves', label: 'Roster moves', icon: <ClipboardList size={16} aria-hidden="true" /> },
@@ -383,6 +575,7 @@ export default function NewsPage({ active, section, team, teams }: { active: boo
   const on = (id: NewsSection) => active && section === id;
   return <>
     <div className="page-panel" hidden={section !== 'headlines'}>{visited.has('headlines') && <HeadlinesSection active={on('headlines')} teams={teams} />}</div>
+    <div className="page-panel" hidden={section !== 'games'}>{visited.has('games') && <GamesSection active={on('games')} />}</div>
     <div className="page-panel" hidden={section !== 'injuries'}>{visited.has('injuries') && <InjuriesSection active={on('injuries')} />}</div>
     <div className="page-panel" hidden={section !== 'teams'}>
       {visited.has('teams') && (team ? <TeamDetailView key={team} code={team} active={on('teams')} /> : <TeamsSection active={on('teams')} />)}

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
@@ -26,6 +25,7 @@ from .league import current_season, fetch_career, fetch_profile, fetch_roster, p
 from .parlay import MAX_LEGS, LegNotFound, price_parlay
 from .assistant import Coach
 from .learning import Learning
+from .newsroom import Newsroom
 from .llm import LLMClient
 from .stats import PROP_STATS, catalog, label as stat_label, validate_line as validate_market_line
 
@@ -33,7 +33,6 @@ ROOT = Path(__file__).resolve().parent.parent
 Stat = Literal[PROP_STATS]  # type: ignore[valid-type]
 Model = Literal["auto", "empirical", "normal", "poisson", "negative_binomial", "simulation"]
 DEFAULT_LOOKBACK = 60
-NEWS_TTL = {"headlines": 600, "injuries": 900, "transactions": 1800, "styles": 6 * 3600, "coaches": 24 * 3600}
 
 
 class StrictModel(BaseModel):
@@ -352,8 +351,19 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
     except ValueError as exc:
         language_model = None
         logging.getLogger("courtside").warning("Language model disabled: %s", exc)
+    def roster_players() -> list[dict]:
+        try:
+            return roster_or_saved()["players"]
+        except NBAUnavailableError:
+            return []
+
+    newsroom = Newsroom(store, roster_players)
+    app.state.newsroom = newsroom
+    if background:
+        Thread(target=newsroom.warm, name="courtside-news-warmup", daemon=True).start()
     coach = Coach(lambda: roster_or_saved()["players"], lambda player_id, refresh: history_frame(player_id, refresh),
-                  store.load, learning=learning, llm=language_model)
+                  store.load, learning=learning, llm=language_model, newsroom=newsroom,
+                  profile=lambda player_id: cached_provider("profile:" + player_id, lambda: fetch_profile(player_id)))
     app.state.coach = coach
     retrain_lock = Lock()
     last_retrain = {"at": float("-inf")}
@@ -729,100 +739,45 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
         return store.add_line(body.model_dump(mode="json"))
 
     # ---------- Newsroom ----------
-    news_locks: dict[str, Lock] = {}
-    news_guard = Lock()
-
-    def news_fresh(cached: dict, ttl: int) -> bool:
+    def feed(call):
         try:
-            age = datetime.now(timezone.utc) - datetime.fromisoformat(cached["fetched_at"])
-        except (KeyError, TypeError, ValueError):
-            return False
-        return timedelta(0) <= age < timedelta(seconds=ttl)
-
-    def news_resource(key: str, fetcher, ttl: int, refresh: bool = False) -> dict:
-        """A cached feed: fresh copy, a new fetch, or the last saved copy marked stale when the provider fails."""
-        with news_guard:
-            lock = news_locks.setdefault(key, Lock())
-        with lock:
-            cached = store.resource(key)
-            if cached is not None and not refresh and news_fresh(cached, ttl):
-                return {**cached, "stale": False, "error": None}
-            try:
-                return {**store.save_resource(key, fetcher()), "stale": False, "error": None}
-            except (news.NewsUnavailableError, NBAUnavailableError) as exc:
-                if cached is not None:
-                    return {**cached, "stale": True, "error": f"{exc} Showing the last saved copy."}
-                raise HTTPException(502, str(exc)) from exc
-
-    def roster_players() -> list[dict]:
-        try:
-            return roster_or_saved()["players"]
-        except NBAUnavailableError:
-            return []
-
-    def headlines(refresh: bool = False) -> dict:
-        return news_resource("news:headlines", lambda: news.fetch_headlines(roster_players()), NEWS_TTL["headlines"], refresh)
-
-    def injuries(refresh: bool = False) -> dict:
-        return news_resource("news:injuries", lambda: news.fetch_injuries(roster_players()), NEWS_TTL["injuries"], refresh)
-
-    def transactions(refresh: bool = False) -> dict:
-        return news_resource("news:transactions", news.fetch_transactions, NEWS_TTL["transactions"], refresh)
-
-    def style_season(which: str) -> str:
-        return current_season() if which == "current" else previous_season(current_season())
-
-    def team_styles(which: str, refresh: bool = False) -> dict:
-        season = style_season(which)
-        return news_resource(f"news:styles:{season}", lambda: news.fetch_team_styles(season), NEWS_TTL["styles"], refresh)
-
-    def coaching_staffs(refresh: bool = False) -> dict:
-        season = current_season()
-
-        def fetch() -> dict:
-            league = news.nba_teams()
-
-            def staff(team: dict) -> dict:
-                try:
-                    return {**news.fetch_coaches(team["id"], season), "team": team["abbreviation"], "error": None}
-                except NBAUnavailableError as exc:
-                    return {"team_id": team["id"], "team": team["abbreviation"], "season": season, "coaches": [], "error": str(exc)}
-
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                staffs = list(pool.map(staff, league))
-            if all(item["error"] for item in staffs):
-                raise NBAUnavailableError("NBA Stats returned no coaching staffs. Try again later.")
-            return {"season": season, "teams": staffs, "provider": "NBA Stats / CommonTeamRoster coaching staffs"}
-
-        return news_resource(f"news:coaches:{season}", fetch, NEWS_TTL["coaches"], refresh)
-
-    def optional(call):
-        try:
-            return call(), None
-        except HTTPException as exc:
-            return None, str(exc.detail)
+            return call()
+        except news.NewsUnavailableError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.get("/api/news/headlines")
     def news_headlines(refresh: bool = False):
-        return headlines(refresh)
+        return feed(lambda: newsroom.headlines(refresh))
 
     @app.get("/api/news/injuries")
     def news_injuries(refresh: bool = False):
-        return injuries(refresh)
+        return feed(lambda: newsroom.injuries(refresh))
 
     @app.get("/api/news/transactions")
     def news_transactions(refresh: bool = False):
-        return transactions(refresh)
+        return feed(lambda: newsroom.transactions(refresh))
 
     @app.get("/api/news/coaches")
     def news_coaches(refresh: bool = False):
-        return coaching_staffs(refresh)
+        return feed(lambda: newsroom.coaches(refresh))
+
+    @app.get("/api/news/games")
+    def news_games(day: date | None = None, refresh: bool = False):
+        target = day or newsroom.today()
+        if abs((target - newsroom.today()).days) > 366:
+            raise HTTPException(422, "Pick a date within a year of today.")
+        board = feed(lambda: newsroom.scoreboard(target, refresh))
+        report, _ = newsroom.attempt(newsroom.injuries)
+        playing = {code for game in board["games"] for code in (game["home"]["team"], game["away"]["team"])}
+        injuries = {team["team"]: [entry for entry in team["injuries"] if entry["status_key"] in ("out", "suspended", "doubtful", "questionable", "day_to_day")]
+                    for team in (report or {}).get("teams", []) if team["team"] in playing}
+        return {**board, "injuries": injuries, "today": newsroom.today().isoformat()}
 
     @app.get("/api/news/teams")
     def news_teams(season: Literal["current", "previous"] = "current", refresh: bool = False):
-        styles = team_styles(season, refresh)
-        report, _ = optional(injuries)
-        staffs, _ = optional(coaching_staffs)
+        styles = feed(lambda: newsroom.styles(season, refresh))
+        report, _ = newsroom.attempt(newsroom.injuries)
+        staffs, _ = newsroom.attempt(newsroom.coaches)
         out = {team["team"]: sum(entry["status_key"] in ("out", "suspended") for entry in team["injuries"])
                for team in (report or {}).get("teams", [])}
         listed = {team["team"]: len(team["injuries"]) for team in (report or {}).get("teams", [])}
@@ -835,52 +790,14 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
 
     @app.get("/api/news/teams/{abbreviation}")
     def news_team(abbreviation: str, refresh: bool = False):
-        code = abbreviation.upper()
-        team = next((item for item in news.nba_teams() if item["abbreviation"] == code), None)
-        if team is None:
-            raise HTTPException(404, "Unknown NBA team abbreviation.")
-        profiles, errors = {}, []
-        for which in ("current", "previous"):
-            styles, error = optional(lambda which=which: team_styles(which, refresh))
-            if styles:
-                profile = next((item for item in styles["teams"] if item["team"] == code), None)
-                if profile:
-                    profiles[which] = {**profile, "season": styles["season"], "summary": news.style_sentence(profile),
-                                       "team_count": styles["team_count"], "fetched_at": styles.get("fetched_at"), "stale": styles.get("stale")}
-            elif error:
-                errors.append(error)
-        staffs, staff_error = optional(lambda: coaching_staffs(refresh))
-        staff = next((item for item in (staffs or {}).get("teams", []) if item["team"] == code), None)
-        report, injury_error = optional(lambda: injuries(refresh))
-        feed, headline_error = optional(lambda: headlines(refresh))
-        moves, move_error = optional(lambda: transactions(refresh))
-        return {
-            "team": team, "profiles": profiles,
-            "coaches": staff["coaches"] if staff else [], "coaches_season": (staffs or {}).get("season"),
-            "injuries": next((item["injuries"] for item in (report or {}).get("teams", []) if item["team"] == code), []),
-            "headlines": [item for item in (feed or {}).get("articles", []) if code in item["teams"]][:12],
-            "transactions": [item for item in (moves or {}).get("transactions", []) if item["team"] == code][:15],
-            "errors": [error for error in (*errors, staff_error, injury_error, headline_error, move_error) if error],
-        }
+        try:
+            return newsroom.team_detail(abbreviation.upper(), refresh)
+        except KeyError as exc:
+            raise HTTPException(404, "Unknown NBA team abbreviation.") from exc
 
     @app.get("/api/news/players/{player_id}")
     def news_player(player_id: str, refresh: bool = False):
-        player = current_player(player_id)
-        report, injury_error = optional(lambda: injuries(refresh))
-        entry, team_entries = None, []
-        for team in (report or {}).get("teams", []):
-            for item in team["injuries"]:
-                if item.get("player_id") == player_id:
-                    entry = item
-            if team["team"] == player.get("team"):
-                team_entries = [item for item in team["injuries"] if item.get("player_id") != player_id]
-        feed, _ = optional(lambda: headlines(refresh))
-        name_key = normalize_name(player["name"])
-        mentions = [item for item in (feed or {}).get("articles", [])
-                    if any(athlete.get("player_id") == player_id or normalize_name(athlete["name"]) == name_key for athlete in item["athletes"])]
-        return {"player_id": player_id, "team": player.get("team"), "injury": entry, "teammates": team_entries,
-                "headlines": mentions[:6], "report_fetched_at": (report or {}).get("fetched_at"),
-                "stale": bool((report or {}).get("stale")), "error": injury_error}
+        return newsroom.player_news(current_player(player_id), refresh)
 
     dist = ROOT / "frontend" / "dist"
     if dist.is_dir():

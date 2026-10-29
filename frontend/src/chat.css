@@ -178,6 +178,7 @@
 .rich-text ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding-left: 20px; list-style: disc; }
 .rich-text li::marker { color: var(--orange-ink); }
 .rich-text strong { color: var(--ink); }
+.rich-text em { color: var(--ink-2); }
 
 .chat-receipts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--success); border-radius: 12px; background: var(--success-soft); }
 .chat-receipts > ul { display: flex; flex: 1 1 210px; flex-direction: column; gap: 4px; min-width: 0; margin: 0; padding: 0; list-style: none; font-size: 14px; font-weight: 600; line-height: 1.45; }
@@ -375,6 +376,69 @@
 .calibration-badge > span { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .calibration-badge.on { background: var(--success-soft); color: var(--success); }
 .calibration-badge.off { background: var(--surface-3); color: var(--ink-2); }
+
+/* League and news cards: news, injuries, games, teams, matchups, rankings, standings, staffs, moves */
+.chat-card h5 { margin: 0; }
+.chat-card-label { color: var(--muted); font-family: var(--font-display); font-size: 12.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.chat-card-section { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.chat-card-more { align-self: flex-start; margin-top: -4px; font-size: 13px; }
+.chat-card-stale { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.chat-card-stale > svg { margin-top: 2px; }
+a.chat-card-action { max-width: 100%; line-height: 1.2; white-space: normal; }
+.chat-card .team-chip { min-height: 24px; padding: 1px 8px; font-size: 12px; }
+.chat-card .team-code { width: 40px; height: 40px; border-radius: 10px; font-size: 13.5px; }
+.chat-card .injury-badge { padding: 2px 8px; font-size: 12px; }
+.chat-team-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.chat-team-head > .chat-card-head { flex: 1; }
+
+.chat-news, .chat-injuries, .chat-slate, .chat-plays, .chat-team-injuries { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.chat-news > li { display: flex; flex-direction: column; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.chat-news > li:last-child { padding-bottom: 0; border-bottom: 0; }
+.chat-news-meta, .chat-news-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--muted); font-size: 12px; }
+.chat-news .kind-pill { padding: 1px 8px; font-size: 11.5px; }
+.chat-news h5 { font-size: 14.5px; line-height: 1.35; }
+.chat-news h5 a { color: var(--ink); text-decoration: none; }
+.chat-news h5 a:hover { color: var(--orange-ink); text-decoration: underline; }
+.chat-news h5 a > svg { margin-left: 5px; color: var(--muted); vertical-align: -1px; }
+.chat-news p, .chat-injuries p { display: -webkit-box; overflow: hidden; color: var(--ink-2); font-size: 13px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+.chat-injuries > li { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line); border-left: 4px solid var(--warning); border-radius: 10px; background: var(--surface-2); }
+.chat-injuries > li:is(.status-out, .status-suspended) { border-left-color: var(--danger); }
+.chat-injuries > li.status-probable { border-left-color: var(--success); }
+.chat-injury-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.chat-injury-who { display: flex; flex-direction: column; min-width: 0; font-weight: 700; line-height: 1.3; }
+.chat-injury-who small { color: var(--muted); font-size: 12px; font-weight: 600; }
+.chat-injury-what { color: var(--ink-2); font-size: 12.5px; line-height: 1.4; }
+
+.chat-plays > li, .chat-team-injuries > li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 10px; font-size: 13.5px; }
+.chat-plays > li > span:first-child, .chat-team-injuries > li > span:first-child { font-weight: 600; }
+.chat-plays-value { font-family: var(--font-score); font-weight: 700; font-variant-numeric: tabular-nums; }
+.chat-plays-value small { color: var(--muted); font-family: var(--font-body); font-weight: 600; }
+.chat-team-injuries > li { justify-content: flex-start; gap: 4px 8px; }
+.chat-team-injuries small { color: var(--muted); font-size: 12px; }
+
+.chat-matchup { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.chat-matchup-team { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.chat-matchup-team h5 { font-family: var(--font-display); font-size: 17px; line-height: 1.15; text-transform: uppercase; overflow-wrap: anywhere; }
+.chat-matchup-team .chat-card-action { margin-top: auto; }
+.chat-ranks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.chat-ranks > div { display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 5px 4px; border-radius: 10px; background: var(--surface); }
+.chat-ranks dt { color: var(--muted); font-family: var(--font-display); font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.chat-ranks dd { font-family: var(--font-score); font-size: 14px; font-weight: 700; }
+.chat-matchup-injuries { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12.5px; }
+.chat-matchup-injuries > svg { color: var(--danger); }
+
+.chat-team-cell { display: inline-flex; align-items: center; gap: 6px; }
+.chat-ranking th[scope="row"] { white-space: normal; }
+:is(.chat-ranking, .chat-standings) td:first-child { color: var(--muted); font-family: var(--font-score); text-align: left; }
+.chat-standings abbr { text-decoration: none; }
+.chat-standings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.chat-standings-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+
+.chat-staff.staff .head-coach { margin-bottom: 10px; padding: 10px 12px; }
+.chat-staff.staff .head-coach strong { font-size: 20px; }
+.chat-staff.staff ul { margin-bottom: 0; }
+.moves-list.chat-moves > li { padding: 8px 0; font-size: 13.5px; }
 
 /* ---------- Track record ---------- */
 .record-view { min-width: 0; }

@@ -56,8 +56,8 @@ const pageCopy: Record<Page, PageCopy> = {
   players: { number: '01', eyebrow: 'EVERY CURRENT NBA PLAYER', title: 'Every line has a story.', description: 'The whole league and every market: points, threes, PRA, stocks, double-doubles and more. Real game history, simulated a quarter-million times.', documentTitle: 'Players' },
   parlay: { number: '02', eyebrow: 'STACK THE LEGS', title: 'Every leg has to land.', description: 'Combine props into one parlay and see the chance that all of them hit. Same-player legs are priced together from the same simulated games.', documentTitle: 'Parlay' },
   bets: { number: '03', eyebrow: 'KEEP SCORE', title: 'The scoreboard settles it.', description: 'Track the parlays you research, grade them against final box scores, and see whether the model is earning its keep.', documentTitle: 'My Bets' },
-  news: { number: '04', eyebrow: 'THE NEWSROOM', title: 'Know before the line moves.', description: 'Injuries, roster moves, coaching staffs and how every team plays, in one place.', documentTitle: 'News' },
-  coach: { number: '05', eyebrow: 'THE HUDDLE', title: 'Talk it through.', description: 'Ask about your slip, check a price against the house, or build the parlay by command. The same conversation as the Ask Coach drawer.', documentTitle: 'Coach' },
+  news: { number: '04', eyebrow: 'THE NEWSROOM', title: 'Know before the line moves.', description: 'Headlines, tonight’s games and lines, injuries, roster moves, coaching staffs and how every team plays, in one place.', documentTitle: 'News' },
+  coach: { number: '05', eyebrow: 'THE HUDDLE', title: 'Talk it through.', description: 'Ask who’s out, what’s on tonight, how a team plays or what a price means, check your slip against the house, or build the parlay by command. The same conversation as the Ask Coach drawer.', documentTitle: 'Coach' },
   how: { number: '06', eyebrow: 'HOW IT WORKS / OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, the evidence, and the things this model cannot tell you.', documentTitle: 'How it works' },
   settings: { number: '07', eyebrow: 'SETTINGS / THE LOCKER ROOM', title: 'Set up your bench.', description: 'How COURTSIDE looks, how hard the simulator works, the NBA history saved on this computer, and how Coach answers.', documentTitle: 'Settings' },
 };
@@ -100,6 +100,8 @@ const playbook: { title: string; plays: string[] }[] = [
   { title: 'Check the price', plays: ['Book has my parlay at +450, is that good?', 'Jokić over 26.5 points at -115?', 'Why are my legs linked?'] },
   { title: 'Scout a player', plays: ['What’s SGA averaging?', 'How often has Jokić gone over 11.5 rebounds in his last 10 games?'] },
   { title: 'Keep score', plays: ['Track this for $10', 'Grade my tracked bets', 'Are you getting smarter?'] },
+  { title: 'League & news', plays: ['Who’s injured on the Lakers?', 'Is LeBron James playing tonight?', 'Latest NBA news', 'What’s the spread for the Celtics game?', 'How do the Thunder play?', 'Who coaches the Warriors?', 'Which team plays the fastest?', 'Standings'] },
+  { title: 'The app & betting basics', plays: ['How does the simulator work?', 'How accurate is the model?', 'What does +150 mean?', 'What’s the vig?'] },
 ];
 
 const sectionOf = (route: Route): string => 'section' in route ? route.section : '';
@@ -562,6 +564,7 @@ export default function App() {
     onOpenParlay: () => leaveDrawerFor({ page: 'parlay' }),
     onOpenRecord: () => leaveDrawerFor({ page: 'bets' }),
     onOpenAccuracy: () => leaveDrawerFor({ page: 'how', section: 'accuracy' }, 'learning-title'),
+    onOpenRoute: (next, options) => leaveDrawerFor(next, options?.focus),
   };
   const putPlay = (play: string) => {
     chat.setDraft(play);

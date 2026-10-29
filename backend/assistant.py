@@ -1,8 +1,9 @@
-"""COURTSIDE Coach: a chat layer over the forecast, parlay and learning engines.
+"""COURTSIDE Coach: a chat layer over the forecast, parlay, learning and newsroom engines.
 
-Slip commands and common questions are handled by a deterministic parser wired to the same code as the UI.
-An optional OpenAI-compatible model answers open-ended questions, but it can only obtain numbers by calling
-the tools defined here, so every probability and price it reports comes from the app's own models.
+Slip commands, props, league questions (news, injuries, games and lines, teams, coaches, standings), betting math and
+questions about the app are handled by a deterministic parser wired to the same code as the UI. An optional
+OpenAI-compatible model answers everything except slip commands, but it can only obtain facts by calling the tools
+defined here, so every probability, price, headline and injury it reports comes from the app's own models and feeds.
 """
 from __future__ import annotations
 
@@ -20,12 +21,16 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import nlu
+from . import nlu, topics
+from . import news
+from .desk import METRIC_KEYS, Desk, injury_what
 from .engine import american_probability, forecast, profit_per_unit
+from .knowledge import KNOWLEDGE
 from .llm import LLMClient, LLMError
 from .nba import NBAUnavailableError
+from .news import NewsUnavailableError
 from .parlay import MAX_LEGS, LegNotFound, fair_odds, price_parlay
-from .stats import with_stat
+from .stats import stat_values, with_stat
 
 DEFAULTS = {"model": "auto", "lookback": 60, "expected_minutes": None, "rest_days": None, "opponent": None, "use_context": True}
 STANDARD_LEG_ODDS = -110
@@ -37,6 +42,24 @@ DISTRESS = re.compile(r"\b(chas(?:e|ing) (?:my )?loss(?:es)?|lost (?:everything|
 LLM_FALLBACK_INTENTS = {"forecast", "house", "explain", "parlay", "summary", "hit_rate"}
 REMOVAL = re.compile(r"\b(?:remove|delete|drop|scratch|take (?:off|out)|get rid of|cut)\b")
 CHANGE = re.compile(r"\b(?:flip|switch|swap|change|move|bump|raise|lower)\b|\bmake (?:it|that|leg|the)\b|\bset (?:leg|the line|it|that)\b")
+# "How does X work?", "what's the vig?", "where do I see my bets?": questions about the app or betting terms.
+HOWTO = re.compile(r"^(?:so |ok |okay |hey |and |but |quick question,? )?(?:how (?:do|does|can|should|would|is|are|accurate|many|much|often does) |"
+                   r"how to |where (?:do|can|is|are|does) |what (?:is|are|does|do|was) |what'?s |whats |explain|tell me (?:about|how) |"
+                   r"define |difference between|why (?:does|do|is|are) |can you explain|is there (?:a|an) |does (?:the|this|courtside|it) |"
+                   r"do you |can i |can you )")
+SLIP_QUESTION = re.compile(r"\b(?:my|our|the|this|these) (?:slip|parlay|legs?|ticket|bet|odds|chances?)\b|\ball (?:\d+|the|my) legs\b|"
+                           r"\b(?:does|will|can|would) (?:it|this|they|that|these) (?:hit|cash|win)\b|\bwhat are (?:my|the) odds\b")
+THANKS = re.compile(r"(?:(?:ok(?:ay)?|cool|nice|great|awesome|perfect|got it|sounds good|appreciate it|cheers|thx|ty|thanks?(?: you)?"
+                    r"(?: so much| a lot)?)[\s!.,]*)+(?:coach)?[\s!.]*")
+# Markets a bare line ("over 23.5?") can mean, and intents that never continue a conversation about one player's prop.
+INFERABLE_STATS = ("points", "rebounds", "assists", "threes", "pts_reb_ast", "pts_reb", "pts_ast", "reb_ast", "steals", "blocks")
+STANDALONE_INTENTS = {"teach", "forget", "undo", "clear", "help", "greet", "track", "settle", "learning", "remove", "update", "parlay"}
+WINDOW = re.compile(r"\b(?:last|past|previous)\s+\d{1,2}\s+games?\b")
+
+
+def strip_vocative(text: str) -> str:
+    """ "Coach, who's out tonight?" -> "who's out tonight?" (the bot's name isn't a question about coaches)."""
+    return re.sub(r"^\s*(?:(?:hey|hi|yo|ok|okay)\s+)?coach\b[,:!]?\s*", "", text, flags=re.I) or text
 
 
 def eastern_today() -> date:
@@ -188,6 +211,7 @@ class Turn:
     changed: bool = False
     engine: str = "built_in"
     priced: dict | None = None
+    llm_tried: bool = False
 
     def say(self, text: str) -> None:
         if text and text not in self.lines:
@@ -207,23 +231,28 @@ class Turn:
 class Coach:
     def __init__(self, roster: Callable[[], list[dict]], history: Callable[[str, bool], tuple[str, pd.DataFrame, dict]],
                  load: Callable[[str], tuple[pd.DataFrame, dict]], learning: Any = None, llm: LLMClient | None = None,
-                 today: Callable[[], date] | None = None, memory: Any = None):
+                 today: Callable[[], date] | None = None, memory: Any = None, newsroom: Any = None,
+                 profile: Callable[[str], dict] | None = None):
         self.roster, self.history, self.load = roster, history, load
         self.learning, self.llm = learning, llm
         self.memory = memory or learning or LocalMemory()
         self.today = today or eastern_today
+        self.newsroom = newsroom
+        self.desk = Desk(newsroom, roster, profile, self.today, learning)
         self.llm_error: str | None = None
 
     # ------------------------------------------------------------------ status
     def status(self) -> dict:
         if self.llm is None:
             return {"mode": "built_in", "model": None, "endpoint": None, "ready": True,
-                    "detail": ("Built-in coach: commands and questions are parsed on this computer and answered with the app's own models. "
-                               "To add a language model for open-ended questions, set COURTSIDE_LLM_MODEL (and COURTSIDE_LLM_API_KEY / "
-                               "COURTSIDE_LLM_BASE_URL for OpenAI, Azure OpenAI v1 or a local Ollama/LM Studio server) and restart.")}
+                    "detail": ("Built-in coach: answers slip commands, props, parlays, news, injuries, schedules, game lines, teams, "
+                               "coaches, standings, betting math and questions about the app on this computer, using the app's own "
+                               "models and feeds. To add a language model for free-form conversation, set COURTSIDE_LLM_MODEL (plus "
+                               "COURTSIDE_LLM_API_KEY / COURTSIDE_LLM_BASE_URL for OpenAI, Anthropic, OpenRouter, Azure OpenAI or a "
+                               "local Ollama/LM Studio server) in .env and restart.")}
         ready = self.llm_error is None
-        detail = (f"Language model {self.llm.model} at {self.llm.endpoint} answers open-ended questions; slip commands and every number "
-                  "still come from the app's models and tools.")
+        detail = (f"Language model {self.llm.model} at {self.llm.endpoint} handles questions and conversation; slip commands and every "
+                  "number, headline and injury still come from the app's models, feeds and tools.")
         if not ready:
             detail += f" The last call failed ({self.llm_error}); the built-in coach is answering until it recovers."
         return {"mode": "llm", "model": self.llm.model, "endpoint": self.llm.endpoint, "ready": ready, "detail": detail}
@@ -260,8 +289,12 @@ class Coach:
 
     # ------------------------------------------------------------------ routing
     def route(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex, previous: dict | None) -> None:
-        names = set(parsed.intents)
         self.learn_from_clarification(turn, index, previous)
+        request = self.follow_up(turn, parsed, index)
+        if request:
+            parsed = nlu.parse(request, self.today())
+            turn.intents = parsed.intents
+        names = set(parsed.intents)
         if "teach" in names and (teach := nlu.parse_teach(parsed.text)):
             return self.teach(turn, teach, index)
         if "forget" in names:
@@ -269,38 +302,63 @@ class Coach:
         if "undo" in names:
             return self.undo(turn)
         if "greet" in names and len(parsed.text.split()) <= 4:
-            turn.say("Hey! I'm the COURTSIDE coach. I can build your parlay from commands, price it against the book and grade the bets you track.")
+            turn.say("Hey! I'm the COURTSIDE coach. Ask me anything about the NBA and your bets: injuries, news, tonight's games and "
+                     "lines, teams and coaches, any player prop, or build and price your parlay.")
             return self.help(turn, intro=False)
-        if "help" in names:
-            return self.help(turn)
-        mentions = [m for m in index.find(parsed.text)]
+        if THANKS.fullmatch(nlu.fold(parsed.text)):
+            turn.say("Anytime. Ask me about a player, a team, tonight's games or your slip whenever you're ready.")
+            turn.suggest("Who's out tonight?", "What games are on tonight?", "What are my odds?" if turn.slip["legs"] else "Latest NBA news")
+            return
+        text = strip_vocative(parsed.text)
+        hits = topics.topics(text)
+        team_mentions = topics.find_teams(text)
+        mentions = self.player_mentions(index, text, team_mentions)
+        teams = [mention.code for mention in team_mentions]
         specs = [nlu.parse_leg(segment) for segment in parsed.segments]
         has_spec = any(spec.stat or spec.side or spec.line is not None for spec in specs)
+        has_prop = has_spec and (bool(mentions) or self.refers_to_focus(parsed.text, turn) or any(spec.line is not None for spec in specs))
         question = bool(names & {"forecast", "house", "hit_rate", "summary", "explain"}) or "?" in parsed.text
-        if "clear" in names:
+        slipish = self.slipish(turn, parsed, mentions, has_spec)
+        if "help" in names:
+            entry = KNOWLEDGE.best(text, 5.0)
+            if entry is not None and entry.id not in ("coach", "navigation", "overview"):
+                return self.desk.say_entry(turn, entry)
+            return self.help(turn)
+        if "clear" in names and (slipish or not hits):
             self.clear(turn)
             if not (mentions and has_spec and "add" in names):
                 return
-        if "track" in names:
+        if "track" in names and (slipish or not teams):
             return self.track(turn, parsed)
         if "settle" in names:
             return self.settle(turn)
-        if "learning" in names and not mentions:
-            return self.learning_status(turn)
-        if "remove" in names:
+        if "remove" in names and slipish:
             removal = [s for s in parsed.segments if REMOVAL.search(nlu.fold(s))] or [parsed.text]
             self.remove(turn, nlu.parse(" ".join(removal), self.today()), index)
             rest = [s for s in parsed.segments if s not in removal]
             if rest and "add" in names:
                 self.add_legs(turn, nlu.parse(" and ".join(rest), self.today()), index)
             return
-        if "update" in names:
+        if "update" in names and slipish:
             changes = [s for s in parsed.segments if CHANGE.search(nlu.fold(s))] or [parsed.text]
             if self.update(turn, nlu.parse(" ".join(changes), self.today()), index):
                 rest = [s for s in parsed.segments if s not in changes]
                 if rest and "add" in names:
                     self.add_legs(turn, nlu.parse(" and ".join(rest), self.today()), index)
                 return
+        command = "add" in names and has_spec and bool(mentions)
+        if self.llm is not None and not command and self.llm_turn(turn):
+            return
+        folded = nlu.fold(text)
+        if topics.OTHER_SPORTS.search(folded) and not teams and not mentions:
+            return self.desk.say_scope(turn, "other_sport")
+        if not has_prop and self.league_question(turn, parsed, text, index, mentions, teams, hits):
+            return
+        if not mentions and parsed.odds is None and HOWTO.search(folded) and not SLIP_QUESTION.search(folded) \
+                and self.desk.site_answer(turn, text):
+            return
+        if "learning" in names and not mentions:
+            return self.learning_status(turn)
         if mentions or self.refers_to_focus(parsed.text, turn):
             adding = "add" in names or (has_spec and not question and not names & {"parlay", "learning"})
             if adding:
@@ -314,34 +372,120 @@ class Coach:
                 return self.player_summary(turn, parsed, index)
             if has_spec or names & {"forecast", "hit_rate", "house"}:
                 return self.leg_question(turn, parsed, index)
-            if self.llm is not None and not names & {"summary"} and self.llm_turn(turn):
-                return
             return self.player_summary(turn, parsed, index)
         if parsed.odds_problem and (names & {"house", "parlay"} or parsed.odds is None and "odds" in nlu.fold(parsed.text)):
             turn.say(parsed.odds_problem)
             return
-        if parsed.odds is not None:
+        if parsed.odds is not None and (turn.slip["legs"] or names & {"house", "parlay"}):
             if "clear" not in names:
                 self.set_odds(turn, parsed.odds)
             return self.price(turn, card=True, explain=True)
+        if parsed.odds is not None and self.desk.say_odds_math(turn, text, parsed.odds, parsed.stake):
+            return
         if re.search(r"\b(?:no|clear|remove|drop)\s+(?:the\s+)?(?:book\s+)?odds\b", nlu.fold(parsed.text)):
             self.set_odds(turn, None)
             return self.price(turn, card=True, explain=True)
-        if "explain" in names and turn.slip["legs"]:
+        if "explain" in names and turn.slip["legs"] and SLIP_QUESTION.search(folded) or "explain" in names and turn.slip["legs"] and not hits:
             return self.explain(turn)
-        if names & {"parlay", "house", "forecast"} and turn.slip["legs"]:
+        if names & {"parlay", "house"} and turn.slip["legs"] or "forecast" in names and turn.slip["legs"] and SLIP_QUESTION.search(folded):
             return self.price(turn, card=True, explain=True)
-        if "learning" in names:
-            return self.learning_status(turn)
-        if self.llm is not None and self.llm_turn(turn):
+        if self.desk.site_answer(turn, text):
             return
+        scope = self.desk.is_off_topic(text, bool(teams or mentions))
+        if scope:
+            return self.desk.say_scope(turn, scope)
         if names & {"parlay", "house"} and not turn.slip["legs"]:
             turn.say("Your slip is empty. Add a leg first, e.g. **add Nikola Jokić over 26.5 points**.")
             turn.suggest("Add Nikola Jokić over 26.5 points", "Help")
             return
-        turn.say("I didn't catch that. Try a command like **add Jamal Murray over 20.5 points**, **flip leg 2**, "
-                 "**book has it at +450 — good price?** or **what's SGA averaging?**")
+        turn.say("I didn't quite catch that. Ask me about a player (**is LeBron playing tonight?**, **what's SGA averaging?**), a "
+                 "team (**how do the Thunder play?**), tonight's games and lines, the news, or give me a slip command like "
+                 "**add Jamal Murray over 20.5 points**.")
         self.help(turn, intro=False, short=True)
+
+    # ------------------------------------------------------------------ league questions
+    def player_mentions(self, index: nlu.PlayerIndex, text: str, teams: list[topics.TeamMention]) -> list[nlu.Mention]:
+        """Player mentions, minus those that are really a team ("houston", "orlando"); a longer player name beats a team word."""
+        mentions = index.find(text)
+        keep = []
+        for mention in mentions:
+            clash = next((team for team in teams if mention.phrase == team.phrase or mention.phrase in team.phrase.split()
+                          or mention.phrase in team.phrase), None)
+            if clash is not None and len(mention.phrase) <= len(clash.phrase):
+                continue
+            keep.append(mention)
+        for mention in keep:
+            for team in list(teams):
+                if team.phrase in mention.phrase.split() or team.phrase == mention.phrase:
+                    teams.remove(team)
+        return keep
+
+    def slipish(self, turn: Turn, parsed: nlu.Parsed, mentions: list[nlu.Mention], has_spec: bool) -> bool:
+        """Whether a remove/change/clear/track verb is about the slip rather than the league ("did the Lakers cut anyone?")."""
+        if parsed.legs or has_spec:
+            return True
+        if re.search(r"\b(?:legs?|slip|parlay|ticket|it|that|this|them|last one|everything|all|book odds)\b", nlu.fold(parsed.text)):
+            return True
+        ids = {leg["request"]["player_id"] for leg in turn.slip["legs"]}
+        return any(any(candidate["id"] in ids for candidate in mention.candidates) for mention in mentions)
+
+    def league_question(self, turn: Turn, parsed: nlu.Parsed, text: str, index: nlu.PlayerIndex, mentions: list[nlu.Mention],
+                        teams: list[str], hits: dict[str, str]) -> bool:
+        if not hits and not teams:
+            return False
+        players: list[dict] = []
+        for mention in mentions:
+            candidates = self.narrow(turn, mention.candidates)
+            if len(candidates) == 1:
+                players.append(candidates[0])
+            elif hits and not teams and not players:
+                options = [{"label": f"{player['name']} · {player['team']}",
+                            "message": re.sub(re.escape(mention.phrase), player["name"], nlu.fold(text), count=1)}
+                           for player in candidates[:6]]
+                turn.clarification = {"prompt": f"Which {mention.phrase.title()}?", "options": options}
+                turn.entities["clarify"] = {"phrase": mention.phrase, "options": {o["message"]: p["id"] for o, p in zip(options, candidates)}}
+                turn.say(f"More than one current player matches “{mention.phrase}”. Which one did you mean?")
+                return True
+        if not players and not teams and re.search(r"\b(?:he|him|his|he's)\b", nlu.fold(text)):
+            player_id = turn.context.get("player_id") or (turn.focus or {}).get("player_id")
+            if player_id and player_id in index.players:
+                players.append(index.players[player_id])
+        if players and set(hits) <= {"player_info"} and re.search(r"\b(?:tell me about|who is|who's)\b", nlu.fold(text)):
+            self.desk.say_bio(turn, players[0], quiet=True)
+            self.player_summary(turn, parsed, index, players[0])
+            return True
+        try:
+            return self.desk.answer(turn, text, players, teams, hits, parsed.odds, parsed.stake,
+                                    has_spec=any(nlu.parse_leg(segment).stat for segment in parsed.segments))
+        except NewsUnavailableError as exc:
+            turn.say(f"The news feeds couldn't be reached just now ({exc}). Try again in a minute.")
+            return True
+
+    def narrow(self, turn: Turn, candidates: list[dict]) -> list[dict]:
+        if len(candidates) <= 1:
+            return candidates
+        preferred = {leg["request"]["player_id"] for leg in turn.slip["legs"]}
+        if turn.focus:
+            preferred.add(turn.focus["player_id"])
+        if turn.context.get("player_id"):
+            preferred.add(turn.context["player_id"])
+        narrowed = [player for player in candidates if player["id"] in preferred]
+        return narrowed if len(narrowed) == 1 else candidates
+
+    def context_notes(self, turn: Turn, player: dict, schedule: bool = True) -> None:
+        """Injury status and next game for a player being forecast, from the cached feeds (best-effort)."""
+        if self.newsroom is None or not player.get("team"):
+            return
+        report, _ = self.newsroom.attempt(self.newsroom.injuries)
+        entry = self.newsroom.injury_entry(player["id"], report) if report else None
+        if entry:
+            what = injury_what(entry)
+            turn.say(f"Heads-up: {player['name']} is listed **{entry['status']}**{f' ({what})' if what else ''} on the injury report; "
+                     "the forecast assumes he plays.")
+        if schedule and player["team"] in topics.TEAM_NAMES:
+            game = self.newsroom.next_game(player["team"])
+            if game:
+                turn.say(f"Next game: {self.desk.game_phrase(game, player['team'])}.")
 
     # ------------------------------------------------------------------ players
     def refers_to_focus(self, text: str, turn: Turn) -> bool:
@@ -349,6 +493,68 @@ class Coach:
             return False
         return bool(re.search(r"\b(?:this|that|him|his|he|the over|the under|this player|this prop|it)\b", nlu.fold(text))) \
             and bool(re.search(r"\b(?:add|over|under|line|o|u)\b", nlu.fold(text)))
+
+    def follow_up(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex) -> str | None:
+        """The full request behind a reply that leans on the conversation: "points" after "Which stat for Scottie Barnes?",
+        or "over or under 23.5?" right after a question about Stephen Curry. None when the message stands on its own."""
+        awaiting = turn.context.get("awaiting")
+        awaiting = awaiting if isinstance(awaiting, dict) else None
+        player = index.players.get(str((awaiting or {}).get("player_id") or turn.context.get("player_id") or ""))
+        if player is None:
+            return None
+        names = set(parsed.intents)
+        text = strip_vocative(parsed.text)
+        folded = nlu.fold(text)
+        if names & STANDALONE_INTENTS or parsed.legs or SLIP_QUESTION.search(folded) or re.search(r"\b(?:slip|parlay|ticket|legs?)\b", folded):
+            return None
+        teams = topics.find_teams(text)
+        if teams or self.player_mentions(index, text, teams):
+            return None
+        awaiting_line = bool(awaiting and awaiting.get("stat") and awaiting.get("line") is None)
+        spec = nlu.parse_leg(text, bare_number=awaiting_line or bool(re.search(r"(?<![\d.])\d{1,3}\.5(?!\d)", folded)))
+        if spec.unsupported or spec.problem or not (spec.stat or spec.side or spec.line is not None):
+            return None
+        hits = topics.topics(text)
+        refers_back = bool(re.search(r"\b(?:he|him|his|he's|the over|the under|that line|same line)\b", folded))
+        howto = bool(HOWTO.search(folded))
+        if re.match(r"(?:and |so |ok |okay )?(?:who|whose|which)\b", folded) or "rank" in hits \
+                or any(level == "strong" and (topic != "advice" or not refers_back) for topic, level in hits.items()) \
+                or howto and not refers_back and (spec.line is None and spec.side is None or KNOWLEDGE.best(text, 3.5) is not None):
+            return None
+        either = bool(nlu.EITHER_SIDE.search(folded))
+        words = len(folded.split())
+        question = bool(names & {"forecast", "house", "hit_rate", "summary", "explain"}) or "?" in text or howto
+        if awaiting and words <= 5:
+            # A bare answer ("points", "the under") finishes what was asked; a question about it only asks.
+            verb = "add" if "add" in names else "ask" if question else awaiting.get("verb") or "ask"
+            stat = spec.stat or awaiting.get("stat")
+            line = spec.line if spec.line is not None else awaiting.get("line")
+            side = None if either else spec.side or awaiting.get("side")
+        elif words <= 8 or refers_back:
+            verb = "add" if "add" in names or not question else "ask"
+            same_stat = spec.stat is None or spec.stat == turn.context.get("stat")
+            stat = spec.stat or (turn.context.get("stat") if spec.line is None else None)
+            line = spec.line if spec.line is not None else turn.context.get("line") if same_stat else None
+            side = None if either else spec.side
+        else:
+            return None
+        if stat is None and line is None:
+            return None
+        parts = [player["name"], side or ("over or under" if line is not None else None),
+                 f"{line:g}" if line is not None else None, nlu.phrase(stat) if stat else None]
+        request = " ".join(part for part in parts if part)
+        if parsed.odds is not None and parsed.odds_problem is None:
+            request += f" at {parsed.odds:+d}"
+        if window := WINDOW.search(folded):
+            request += f" in his {window.group(0)}"
+        return f"add {request}" if verb == "add" else f"{request}?"
+
+    @staticmethod
+    def await_reply(turn: Turn, verb: str, player: dict, stat: str | None = None, line: float | None = None,
+                    side: str | None = None) -> None:
+        """Remembers a half-finished request so a short reply next turn ("points", "under", "22.5") can complete it."""
+        turn.entities["player_id"] = player["id"]
+        turn.entities["awaiting"] = {"verb": verb, "player_id": player["id"], "stat": stat, "line": line, "side": side}
 
     def resolve(self, turn: Turn, text: str, index: nlu.PlayerIndex, verb: str, spec: nlu.LegSpec | None = None) -> dict | None:
         mentions = index.find(text)
@@ -465,6 +671,7 @@ class Coach:
     # ------------------------------------------------------------------ slip commands
     def add_legs(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex) -> None:
         carried: dict = {}
+        noted: set[str] = set()
         for segment in parsed.segments:
             spec = nlu.parse_leg(segment)
             if spec.unsupported:
@@ -484,15 +691,20 @@ class Coach:
                 continue
             focus = turn.focus if turn.focus and turn.focus["player_id"] == player["id"] else None
             stat = spec.stat or (focus or {}).get("stat") or (carried.get("stat") if carried.get("player") is player else None)
+            if not stat and spec.line is not None:
+                # Adding never guesses a market, but keeps the one being discussed ("over 27.5" after Curry's points).
+                stat = self.likely_stat(turn, player, spec.line, guess=False)[0]
             line = spec.line if spec.line is not None else (focus or {}).get("line") if (focus or {}).get("stat") == stat else None
             if not stat:
                 turn.say(f"Which stat for {player['name']}? Points, rebounds, assists, threes, PRA, steals, blocks and more.")
-                turn.suggest(*(f"add {player['name']} over {line:g} {s}" if line is not None else f"what's {player['name']} averaging?"
-                               for s in ("points", "rebounds", "assists")))
+                turn.suggest(*(f"add {player['name']} {spec.side or 'over'} {line:g} {s}" if line is not None
+                               else f"what's {player['name']} averaging?" for s in ("points", "rebounds", "assists")))
+                self.await_reply(turn, "add", player, line=line, side=spec.side)
                 continue
             if line is None:
                 turn.say(f"What line for {player['name']} {nlu.phrase(stat)}? For example **add {player['name']} over 20.5 {nlu.phrase(stat)}**.")
                 turn.suggest(f"what's {player['name']} averaging?")
+                self.await_reply(turn, "add", player, stat=stat, side=spec.side)
                 continue
             side = spec.side
             if side is None:
@@ -500,9 +712,12 @@ class Coach:
                     {"label": f"Over {line:g}", "message": f"add {player['name']} over {line:g} {nlu.phrase(stat)}"},
                     {"label": f"Under {line:g}", "message": f"add {player['name']} under {line:g} {nlu.phrase(stat)}"}]}
                 turn.say(f"Over or under {line:g} {nlu.phrase(stat)} for {player['name']}?")
+                self.await_reply(turn, "add", player, stat=stat, line=line)
                 return
             carried = {"player": player, "stat": stat}
-            self.place_leg(turn, player, stat, line, side)
+            if self.place_leg(turn, player, stat, line, side) and player["id"] not in noted:
+                noted.add(player["id"])
+                self.context_notes(turn, player, schedule=False)
 
     def place_leg(self, turn: Turn, player: dict, stat: str, line: float, side: str) -> bool:
         try:
@@ -518,7 +733,7 @@ class Coach:
         existing = next((i for i, leg in enumerate(legs) if leg["request"]["player_id"] == player["id"] and leg["request"]["stat"] == stat), None)
         if existing is not None and legs[existing]["request"] == request:
             turn.say(f"Leg {existing + 1} is already **{description}** — {pct(probability)}.")
-            turn.entities.update({"player_id": player["id"], "stat": stat, "leg": existing + 1})
+            turn.entities.update({"player_id": player["id"], "stat": stat, "line": line, "leg": existing + 1})
             return True
         if existing is not None:
             old = legs[existing]["request"]
@@ -534,7 +749,7 @@ class Coach:
             number = len(legs)
             turn.act("add_leg", f"Added leg {number}: {description}", number)
             turn.say(f"Added leg {number}: **{description}** — {pct(probability)} by the model.")
-        turn.entities.update({"player_id": player["id"], "stat": stat, "leg": number})
+        turn.entities.update({"player_id": player["id"], "stat": stat, "line": line, "leg": number})
         return True
 
     def leg_targets(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex) -> list[int]:
@@ -715,6 +930,12 @@ class Coach:
             return
         focus = turn.focus if turn.focus and turn.focus["player_id"] == player["id"] else None
         stat = spec.stat or (focus or {}).get("stat")
+        assumed = None
+        if not stat and spec.line is not None:
+            stat, means, inferred = self.likely_stat(turn, player, spec.line)
+            if not stat:
+                return self.ask_stat(turn, player, spec, means)
+            assumed = means[stat] if inferred else None
         if not stat:
             return self.player_summary(turn, parsed, index, player)
         line = spec.line
@@ -758,11 +979,15 @@ class Coach:
             "calibrated": calibrated, "house": house, "side": side,
         })
         name = result["player"]["name"]
+        if assumed is not None:
+            turn.say(f"Assuming you mean **{nlu.phrase(stat)}** (his recent average is {assumed:.1f}).")
         if side:
             turn.say(f"**{name} {side} {line:g} {nlu.phrase(stat)}: {pct(chances[side])}** by the model "
                      f"({'under' if side == 'over' else 'over'} {pct(chances['under' if side == 'over' else 'over'])}).")
         else:
-            turn.say(f"**{name} {line:g} {nlu.phrase(stat)}:** over {pct(chances['over'])}, under {pct(chances['under'])}.")
+            lean = "over" if chances["over"] > chances["under"] else "under"
+            turn.say(f"**{name} {line:g} {nlu.phrase(stat)}:** over {pct(chances['over'])}, under {pct(chances['under'])}"
+                     + (", close to a coin flip." if abs(chances["over"] - chances["under"]) < 0.04 else f", so the model leans **{lean}**."))
         if chances["push"] > 1e-9:
             turn.say(f"Push (exactly {line:g}): {pct(chances['push'])}.")
         span = f"last {len(values)} games"
@@ -772,9 +997,48 @@ class Coach:
             turn.say(f"Calibrated by past results: over {pct(calibrated['over'])}, under {pct(calibrated['under'])} (if it settles).")
         if house:
             turn.say(house["note"])
-        turn.entities.update({"player_id": player["id"], "stat": stat})
+        self.context_notes(turn, player)
+        turn.entities.update({"player_id": player["id"], "stat": stat, "line": line})
         pick = side or ("over" if chances["over"] >= chances["under"] else "under")
         turn.suggest(f"add {name} {pick} {line:g} {nlu.phrase(stat)}", f"what's {name} averaging?")
+
+    def likely_stat(self, turn: Turn, player: dict, line: float, guess: bool = True) -> tuple[str | None, dict[str, float], bool]:
+        """(market, recent averages, assumed) for a line given without a stat. The conversation's market wins if the line
+        suits it; otherwise, when ``guess`` is set, the market whose average is clearly nearest the line (23.5 for a 25-point
+        scorer is points, and assumed is True). No market when two fit about equally well, e.g. 3.5 for a guard with 3.7
+        threes and 3.3 rebounds; the averages returned then are the closest candidates."""
+        try:
+            _, frame, _ = self.player_data(player["id"])
+        except ValueError:
+            return None, {}, False
+        recent = frame[frame["player_id"] == player["id"]].sort_values("date").tail(10)
+        current = turn.context.get("stat") if turn.context.get("player_id") == player["id"] else None
+        means = {}
+        for stat in INFERABLE_STATS + ((current,) if current in nlu.STATS and current not in INFERABLE_STATS else ()):
+            values = stat_values(recent, stat).dropna()
+            if len(values) >= 3:
+                means[stat] = float(values.mean())
+        distance = {stat: abs(line - mean) / max(mean, 1.0) for stat, mean in means.items()}
+        ranked = sorted(distance, key=distance.get)
+        if current in distance and distance[current] <= 0.35:
+            return current, means, False
+        if guess and ranked:
+            best, runner = distance[ranked[0]], distance[ranked[1]] if len(ranked) > 1 else math.inf
+            if best <= 0.35 and runner >= max(2 * best, best + 0.05):
+                return ranked[0], means, True
+        close = [stat for stat in ranked[:3] if distance[stat] <= 0.5] or ranked[:3]
+        return None, {stat: means[stat] for stat in close}, False
+
+    def ask_stat(self, turn: Turn, player: dict, spec: nlu.LegSpec, options: dict[str, float]) -> None:
+        if options:
+            named = [f"{nlu.phrase(stat)} ({mean:.1f})" for stat, mean in options.items()]
+            choices = f"{', '.join(named[:-1])} or {named[-1]}" if len(named) > 1 else named[0]
+            turn.say(f"Which stat for {player['name']} at {spec.line:g}? Nearest his recent averages: {choices}.")
+        else:
+            turn.say(f"Which stat for {player['name']} at {spec.line:g}? Points, rebounds, assists, threes, PRA, steals, blocks and more.")
+        turn.suggest(*(" ".join(part for part in (player["name"], spec.side, f"{spec.line:g}", nlu.phrase(stat)) if part) + "?"
+                       for stat in (options or ("points", "rebounds", "assists"))))
+        self.await_reply(turn, "ask", player, line=spec.line, side=spec.side)
 
     def player_summary(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex, player: dict | None = None) -> None:
         if player is None:
@@ -883,20 +1147,25 @@ class Coach:
 
     def help(self, turn: Turn, intro: bool = True, short: bool = False) -> None:
         if intro:
-            turn.say("Here's what I can do:")
+            turn.say("Ask me anything about the NBA, your bets or this app. For example:")
         if not short:
-            for line in ("- **Build the slip:** “add Jokić over 26.5 points and Murray 21+ points”, “remove leg 2”, “flip the Murray leg”, "
-                         "“change leg 1 line to 27.5”, “undo”, “clear my slip”",
-                         "- **Price it against the house:** “what are my odds?”, “book has it at +450 — good price?”, “Jokić over 26.5 at −115?”",
-                         "- **Research:** “what's SGA averaging?”, “how often has Wemby gone over 3.5 blocks in his last 10 games?”, “why are my legs linked?”",
-                         "- **Track and learn:** “track this for $10 at +450”, “grade my bets”, “are you getting smarter?”, “remember joker means Nikola Jokić”"):
+            for line in ("- **League & news:** “who's out tonight?”, “is LeBron playing?”, “latest Celtics news”, “any trades?”, "
+                         "“who coaches the Warriors?”, “how do the Thunder play?”, “which team plays fastest?”, “standings”",
+                         "- **Games & lines:** “what games are on tonight?”, “what's the spread for the Lakers game?”, “did the Knicks win?”",
+                         "- **Props & research:** “Jokić over 26.5 points?”, “what's SGA averaging?”, “how often has Wemby had 4+ blocks in his last 10?”",
+                         "- **Build & price the slip:** “add Jokić over 26.5 points and Murray 21+ points”, “flip leg 2”, “book has it at +450 — good price?”",
+                         "- **Track & learn:** “track this for $10 at +450”, “grade my bets”, “are you getting smarter?”",
+                         "- **The app & betting basics:** “how does the simulator work?”, “how accurate is the model?”, “what does +150 mean?”, “what's the vig?”"):
                 turn.say(line)
-        turn.suggest("Add Nikola Jokić over 26.5 points", "What are my odds?", "What's SGA averaging?", "Are you getting smarter?")
+        turn.suggest("Who's out tonight?", "What games are on tonight?", "Add Nikola Jokić over 26.5 points", "How accurate is the model?")
 
     # ------------------------------------------------------------------ language model
     def llm_turn(self, turn: Turn) -> bool:
         """Lets the configured model answer with tool calls; returns False (built-in fallback) on any failure."""
         assert self.llm is not None
+        if turn.llm_tried:
+            return False
+        turn.llm_tried = True
         index = nlu.PlayerIndex(self.roster(), self.memory.aliases())
         messages = [{"role": "system", "content": self.system_prompt(turn)}]
         for example in self.memory.examples(turn.message, 3):
@@ -926,7 +1195,7 @@ class Coach:
                         if not isinstance(arguments, dict):
                             raise ValueError("Tool arguments must be a JSON object.")
                         output = self.tool(turn, index, name, arguments)
-                    except (ValueError, KeyError, TypeError, LegNotFound) as exc:
+                    except (ValueError, KeyError, TypeError, LegNotFound, NewsUnavailableError, NBAUnavailableError) as exc:
                         output = {"error": str(exc)}
                     turn.tool_calls.append({"name": name, "arguments": call.get("function", {}).get("arguments", "")[:500]})
                     messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(output, default=str)[:6000]})
@@ -945,12 +1214,20 @@ class Coach:
                 for i, leg in enumerate(turn.slip["legs"])]
         focus = turn.focus
         return (
-            "You are COURTSIDE Coach, the assistant inside a local NBA player-prop research app. "
-            "Rules: (1) Every number you state — probabilities, odds, averages, hit rates — must come from a tool result in this "
-            "conversation; never estimate or invent statistics, odds or injury news. (2) Use the slip tools to change the parlay when "
-            "the user asks; confirm what changed. (3) Probabilities are not certainties; this is research, not betting advice. Never "
-            "encourage betting, chasing losses or larger stakes; if the user seems distressed, mention 1-800-GAMBLER. (4) Supported stats: "
-            "points, rebounds, assists, threes, steals, blocks, turnovers, PRA and the other combos, shooting makes and attempts, fouls, double-doubles and triple-doubles. (5) Be concise: at most 120 words, plain text, **bold** and '- ' bullets only. "
+            "You are COURTSIDE Coach, the assistant inside COURTSIDE, a local NBA player-prop research app. Pages: Players (Props "
+            "forecasts, Game log, Career, Lines notebook), Parlay, My Bets, News (Headlines, Injury report, Teams & coaches, Roster "
+            "moves, Games with betting lines), Coach; menus How it works (Method, Accuracy) and Settings (Appearance, Model, Data, Coach). "
+            "Answer any question about NBA betting, the NBA (news, injuries, schedules, scores, game lines, teams, coaches, playing "
+            "styles, standings, rosters, players) or the app, using the tools. "
+            "Rules: (1) Every fact and number (probabilities, odds, stats, injuries, headlines, schedules, lines, records) must come "
+            "from a tool result in this conversation; never answer current NBA facts from memory, which may be outdated. If the tools "
+            "have nothing, say so. (2) Use the slip tools only when the user asks to change the parlay, and confirm what changed. "
+            "(3) This is research, not betting advice: never promise outcomes or give 'locks', never encourage betting, chasing "
+            "losses or bigger stakes; if the user seems distressed, mention 1-800-GAMBLER. (4) If a question has nothing to do with "
+            "basketball, betting or the app, decline in one sentence and say what you can help with. (5) Supported prop markets: "
+            "points, rebounds, assists, threes, steals, blocks, turnovers, PRA and the other combos, stocks, shooting makes and "
+            "attempts, offensive and defensive rebounds, fouls, double-doubles and triple-doubles. (6) Be concise: at most 150 words, "
+            "plain text with **bold** and '- ' bullets only; the app shows cards for tool results, so summarize rather than list everything. "
             f"Today (US Eastern): {self.today().isoformat()}. Current slip: {('; '.join(slip)) or 'empty'}; book odds: "
             f"{odds_text(turn.slip.get('book_odds')) if turn.slip.get('book_odds') is not None else 'none'}. "
             f"Props view focus: {focus['player'] + ' ' + focus['stat'] + ' ' + format(focus['line'], 'g') if focus else 'none'}."
@@ -980,6 +1257,116 @@ class Coach:
                 raise ValueError("Side must be over or under.")
             return value
 
+        def team_of(value) -> str:
+            raw = str(value or "").strip()
+            code = topics.CODE_ALIASES.get(raw.upper(), raw.upper())
+            if code in topics.TEAM_NAMES:
+                return code
+            found = topics.find_teams(raw) or topics.find_teams(raw.lower())
+            if not found:
+                raise ValueError(f"No NBA team matches {raw!r}.")
+            return found[0].code
+
+        def day_of(value) -> date:
+            if not value:
+                return self.today()
+            day = topics.find_day(str(value), self.today())
+            if day is None:
+                raise ValueError("Use today, tomorrow, yesterday, a weekday or YYYY-MM-DD.")
+            return day
+
+        def card(item: dict) -> None:
+            if sum(1 for existing in turn.cards if existing.get("type") not in ("forecast", "parlay")) < 3:
+                turn.cards.append(item)
+
+        if name in LEAGUE_TOOLS and self.newsroom is None and name not in ("site_help", "model_accuracy", "odds_math", "player_profile", "team_roster"):
+            raise ValueError("The newsroom feeds aren't connected.")
+        if name == "nba_news":
+            player = player_named(args["player"]) if args.get("player") else None
+            team = team_of(args["team"]) if args.get("team") else None
+            data = self.desk.data_headlines(team=team, player=player, kind=args.get("kind"), query=args.get("query"))
+            if data["articles"]:
+                card(self.desk.news_card(f"{player['name'] if player else self.desk.team_name(team) if team else 'NBA'} headlines", data,
+                                         f"#/news/teams/{team.lower()}" if team else "#/news"))
+            return data
+        if name == "injury_report":
+            if args.get("player"):
+                player = player_named(args["player"])
+                data = self.desk.data_injuries(player=player)
+                entries = ([data["entry"]] if data["entry"] else []) + [m for m in data["teammates"] if m["status_key"] != "probable"]
+                card(self.desk.injury_card(f"{player['name']} injury report", entries, data))
+                return data
+            if args.get("team"):
+                team = team_of(args["team"])
+                data = self.desk.data_injuries(team=team)
+                card(self.desk.injury_card(f"{self.desk.team_name(team)} injury report", data["entries"], data, f"#/news/teams/{team.lower()}"))
+                return data
+            if args.get("date"):
+                day = day_of(args["date"])
+                data = self.desk.data_injuries(day=day)
+                card(self.desk.injury_card(f"Injuries for {day.isoformat()} games", data["entries"], data))
+                return data
+            data = self.desk.data_injuries()
+            card(self.desk.injury_card("Latest injury updates", data["latest"], data))
+            return data
+        if name == "roster_moves":
+            team = team_of(args["team"]) if args.get("team") else None
+            player = player_named(args["player"]) if args.get("player") else None
+            return self.desk.data_moves(team, player)
+        if name == "games":
+            team = team_of(args["team"]) if args.get("team") else None
+            if team and not args.get("date"):
+                game = self.newsroom.next_game(team)
+                if game:
+                    card(self.desk.games_card("Next game", date.fromisoformat(game["date"]) if game.get("date") else self.today(), [game]))
+                return {"team": team, "next_game": game and self.desk.compact_game(game)}
+            day = day_of(args.get("date"))
+            data = self.desk.data_games(day, team)
+            if data["games"]:
+                card(self.desk.games_card(f"Games on {day.isoformat()}", day, data["games"]))
+            return data
+        if name == "team_profile":
+            data = self.desk.data_team(team_of(args["team"]))
+            card(self.desk.team_card(data))
+            return data
+        if name == "coaching_staff":
+            team = team_of(args["team"])
+            staffs = self.newsroom.coaches()
+            staff = next((item for item in staffs.get("teams", []) if item["team"] == team), None)
+            return {"team": team, "season": staffs.get("season"), "coaches": (staff or {}).get("coaches", [])}
+        if name == "team_rankings":
+            metric = str(args.get("metric"))
+            if metric not in METRIC_KEYS:
+                raise ValueError("Metric must be one of: " + ", ".join(METRIC_KEYS) + ".")
+            return self.desk.data_rankings(metric, args.get("order") != "worst")
+        if name == "standings":
+            conference = args.get("conference")
+            return self.desk.data_standings(conference if conference in ("East", "West") else None)
+        if name == "team_roster":
+            team = team_of(args["team"])
+            report, _ = self.newsroom.attempt(self.newsroom.injuries) if self.newsroom else (None, None)
+            status = {entry.get("player_id"): entry["status"] for item in (report or {}).get("teams", []) for entry in item["injuries"]}
+            return {"team": team, "players": [{"name": p["name"], "status": status.get(p["id"])} for p in self.desk.players_on(team)]}
+        if name == "player_profile":
+            player = player_named(args["player"])
+            out = self.desk.data_bio(player)
+            if self.newsroom is not None:
+                report, _ = self.newsroom.attempt(self.newsroom.injuries)
+                out["injury"] = self.newsroom.injury_entry(player["id"], report)
+                game = self.newsroom.next_game(player["team"]) if player.get("team") in topics.TEAM_NAMES else None
+                out["next_game"] = game and self.desk.compact_game(game)
+            return out
+        if name == "site_help":
+            return self.desk.data_site_help(str(args.get("question", "")))
+        if name == "model_accuracy":
+            return self.desk.data_accuracy(stat_of(args["stat"]) if args.get("stat") else None)
+        if name == "odds_math":
+            odds = int(args["odds"])
+            american_probability(odds)
+            stake = float(args["stake"]) if args.get("stake") is not None else None
+            if stake is not None and not 0 < stake <= 1_000_000:
+                raise ValueError("Stake must be between 0 and 1,000,000.")
+            return self.desk.data_odds(odds, stake)
         if name == "get_slip":
             result = self.price(turn, card=False) if turn.slip["legs"] else None
             return {"legs": [{"leg": i + 1, **leg["label"], **{k: leg["request"][k] for k in ("stat", "side", "line")}} for i, leg in enumerate(turn.slip["legs"])],
@@ -1067,6 +1454,8 @@ _PLAYER = {"type": "string", "description": "Player name as the user wrote it or
 _STAT = {"type": "string", "enum": list(nlu.STATS)}
 _LINE = {"type": "number", "description": "Whole or half point, e.g. 26.5"}
 _SIDE = {"type": "string", "enum": ["over", "under"]}
+_TEAM = {"type": "string", "description": "NBA team name, nickname, city or abbreviation"}
+_DATE = {"type": "string", "description": "today, tomorrow, yesterday, a weekday or YYYY-MM-DD (US Eastern)"}
 TOOLS = [
     _tool("get_slip", "Current parlay slip legs, book odds and the model's joint probability."),
     _tool("find_player", "Look up current NBA players by name or nickname.", {"name": _PLAYER}, ["name"]),
@@ -1083,4 +1472,29 @@ TOOLS = [
     _tool("price_slip", "Price the slip: joint probability, fair odds, comparison with the book's price, leg links."),
     _tool("track_record", "Results of the user's tracked bets."),
     _tool("learning_status", "What the app has learned: calibration, nicknames, feedback."),
+    _tool("nba_news", "Latest NBA headlines, optionally for one team or player, one kind, or containing keywords.",
+          {"team": _TEAM, "player": _PLAYER, "kind": {"type": "string", "enum": list(news.KINDS)}, "query": {"type": "string"}}),
+    _tool("injury_report", "Injury report: one player's status with his next game, one team's list, every listed player in a "
+          "date's games, or (no arguments) the latest league updates.", {"player": _PLAYER, "team": _TEAM, "date": _DATE}),
+    _tool("roster_moves", "Recent signings, trades, waivers and other transactions.", {"team": _TEAM, "player": _PLAYER}),
+    _tool("games", "Games on a date (start time, status, scores, spread, total, moneyline), or a team's next game when only "
+          "team is given.", {"date": _DATE, "team": _TEAM}),
+    _tool("team_profile", "A team's record and seed, head coach, playing style, key league ranks, play types, injuries and next game.",
+          {"team": _TEAM}, ["team"]),
+    _tool("coaching_staff", "A team's head coach and assistant coaches.", {"team": _TEAM}, ["team"]),
+    _tool("team_rankings", "The league's top (best) or bottom (worst) five teams in a metric.",
+          {"metric": {"type": "string", "enum": list(METRIC_KEYS)}, "order": {"type": "string", "enum": ["best", "worst"]}}, ["metric"]),
+    _tool("standings", "Standings with record, seed and games back, for one conference or both.",
+          {"conference": {"type": "string", "enum": ["East", "West"]}}),
+    _tool("team_roster", "Current players on a team with any injury status.", {"team": _TEAM}, ["team"]),
+    _tool("player_profile", "A player's bio (team, position, height, weight, age, experience, draft, school), injury status and next game.",
+          {"player": _PLAYER}, ["player"]),
+    _tool("site_help", "How COURTSIDE works: pages, features, the game simulator, accuracy, calibration, data sources, settings, "
+          "privacy and betting terms (vig, EV, spreads, parlays, pushes).", {"question": {"type": "string"}}, ["question"]),
+    _tool("model_accuracy", "Walk-forward accuracy of the model overall or for one market, and the current calibration status.",
+          {"stat": _STAT}),
+    _tool("odds_math", "Convert American odds to decimal, fractional and implied probability, with the payout for a stake.",
+          {"odds": {"type": "integer"}, "stake": {"type": "number"}}, ["odds"]),
 ]
+LEAGUE_TOOLS = {"nba_news", "injury_report", "roster_moves", "games", "team_profile", "coaching_staff", "team_rankings", "standings",
+                "team_roster", "player_profile", "site_help", "model_accuracy", "odds_math"}

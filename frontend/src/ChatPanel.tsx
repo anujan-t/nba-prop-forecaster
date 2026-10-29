@@ -8,16 +8,16 @@ import type { ChatMessage, CoachMessage, UserMessage } from './chat';
 import { CardBoundary, ChatCardView, RichText } from './ChatCards';
 import { Ball, DribbleBall } from './components';
 import { chance } from './parlay';
+import type { Go } from './RouteLink';
 import type { ChatState } from './useChat';
 
 const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export const starterPrompts = [
+  'Who\'s out tonight?',
+  'What games are on tonight?',
   'Add Nikola Jokić over 26.5 points',
-  'What are my parlay\'s odds?',
-  'Book has my parlay at +450 — is that good?',
-  'Grade my tracked bets',
-  'Are you getting smarter?',
+  'How accurate is the model?',
 ];
 
 /** Speech bubble with an X-and-O play drawn inside: the coach's whiteboard. */
@@ -74,6 +74,8 @@ interface CardLinks {
   onOpenParlay: () => void;
   onOpenRecord: () => void;
   onOpenAccuracy: () => void;
+  /** In-app links inside news, injury, game and team cards. */
+  onOpenRoute: Go;
 }
 
 interface TurnProps extends CardLinks {
@@ -86,7 +88,7 @@ interface TurnProps extends CardLinks {
   onRate: (messageId: string, rating: 1 | -1) => void;
 }
 
-function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onRate, onOpenParlay, onOpenRecord, onOpenAccuracy }: TurnProps) {
+function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onRate, onOpenParlay, onOpenRecord, onOpenAccuracy, onOpenRoute }: TurnProps) {
   const { reply } = message;
   const skipped = message.slip === 'skipped';
   const clarification = reply.clarification;
@@ -102,7 +104,7 @@ function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onR
         {undoable && <button type="button" className="chat-chip undo-chip" disabled={busy} onClick={() => onSend('undo')}><Undo2 size={14} aria-hidden="true" />Undo</button>}
       </div>}
       {message.notes.map((note, index) => <p key={index} className="chat-note"><TriangleAlert size={14} aria-hidden="true" /><span>{note}</span></p>)}
-      {reply.cards.map((card, index) => <CardBoundary key={index}><ChatCardView card={card} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} /></CardBoundary>)}
+      {reply.cards.map((card, index) => <CardBoundary key={index}><ChatCardView card={card} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} onOpenRoute={onOpenRoute} /></CardBoundary>)}
       {reply.learned.map((text, index) => <p key={index} className="chat-learned"><Sparkles size={13} aria-hidden="true" /><span>{/^learned\b/i.test(text) ? text : `Learned: ${text}`}</span></p>)}
       {clarification && <div className="chat-clarify" role="group" aria-labelledby={`clarify-${message.id}`}>
         <p id={`clarify-${message.id}`}>{clarification.prompt || 'Which one did you mean?'}</p>
@@ -150,7 +152,7 @@ interface ConversationViewProps extends ConversationProps {
 }
 
 /** The conversation itself. Rendered either in the drawer or on the Coach page, never both at once. */
-function ChatConversation({ variant, active, onClose, chat, focus, slipCount, slipProbability, slipBusy, slipHash, bounce, onOpenSlip, onOpenParlay, onOpenRecord, onOpenAccuracy }: ConversationViewProps) {
+function ChatConversation({ variant, active, onClose, chat, focus, slipCount, slipProbability, slipBusy, slipHash, bounce, onOpenSlip, onOpenParlay, onOpenRecord, onOpenAccuracy, onOpenRoute }: ConversationViewProps) {
   const { conversation, pending, failure, status, statusError, draft, setDraft } = chat;
   const messages = conversation.messages;
   const busy = pending !== null;
@@ -274,7 +276,7 @@ function ChatConversation({ variant, active, onClose, chat, focus, slipCount, sl
       <RichText text={status.detail} />
       {status.endpoint && <p className="engine-endpoint">Endpoint: <code>{status.endpoint}</code></p>}
     </> : <p>{statusError ? `The assistant status couldn’t be loaded. ${statusError}` : 'Checking which engine is answering…'}</p>}
-    <p className="engine-promise">Every number comes from COURTSIDE’s own forecast and parlay tools.</p>
+    <p className="engine-promise">Every number comes from COURTSIDE’s own tools: its forecasts, parlay math and the league feeds it reads.</p>
   </div>;
   const toolbar = <div className="chat-toolbar">
     <button id="chat-slip-chip" type="button" className={`chat-slip-chip${slipCount ? ' has-legs' : ''}`} onClick={onOpenSlip}
@@ -296,7 +298,7 @@ function ChatConversation({ variant, active, onClose, chat, focus, slipCount, sl
         <div className="chat-heading">
           <span className="eyebrow">THE HUDDLE</span>
           <h2 id="chat-title" ref={title} tabIndex={-1}>Coach</h2>
-          <p id="chat-subtitle" className="sr-only">Ask about your bets and parlay slip, compare a price with the house, or build the slip by command.</p>
+          <p id="chat-subtitle" className="sr-only">Ask about injuries, games and lines, news, teams, your bets and parlay slip, or build the slip by command.</p>
         </div>
         {engineBadge}
         <button type="button" className="icon-button chat-close" aria-label="Close Coach" onClick={onClose}><X size={18} aria-hidden="true" /></button>
@@ -307,7 +309,7 @@ function ChatConversation({ variant, active, onClose, chat, focus, slipCount, sl
       {!messages.length && !busy ? <div className="chat-empty">
         <HuddleArt />
         <h3>What’s the play?</h3>
-        <p>Ask about your slip, check a price against the house, or build the parlay by command. Coach runs the same models as the rest of COURTSIDE.</p>
+        <p>Ask who’s out, what’s on tonight and at what line, how a team plays, or build the parlay by command. Coach runs the same models as the rest of COURTSIDE.</p>
         <ul className="chat-starters" aria-label="Try asking">{starterPrompts.map(prompt => <li key={prompt}>
           <button type="button" className="chat-starter" onClick={() => sendQuick(prompt)}><span>{prompt}</span><ArrowUpRight size={15} aria-hidden="true" /></button>
         </li>)}</ul>
@@ -316,7 +318,7 @@ function ChatConversation({ variant, active, onClose, chat, focus, slipCount, sl
           ? <UserTurn key={message.id} message={message} answered={answered(index) || index === messages.length - 1} />
           : <CoachTurn key={message.id} message={message} latest={index === messages.length - 1} undoable={message.id === undoId} busy={busy}
             feedbackError={chat.feedbackError?.messageId === message.id ? chat.feedbackError.message : null}
-            onSend={sendQuick} onRate={chat.rate} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} />)}
+            onSend={sendQuick} onRate={chat.rate} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} onOpenRoute={onOpenRoute} />)}
         {busy && <li className="chat-turn coach thinking">
           <span className="chat-avatar" aria-hidden="true"><CoachMark /></span>
           <div className="chat-bubble coach-bubble thinking-bubble" role="status"><DribbleBall /><span>Coach is drawing up the play…</span></div>
@@ -332,7 +334,7 @@ function ChatConversation({ variant, active, onClose, chat, focus, slipCount, sl
       {focus && <p className="chat-context"><Target size={13} aria-hidden="true" /><span>Props: <strong>{focus.player}</strong> · {statNames[focus.stat]} {focus.line}</span></p>}
       <div className={`chat-input-row${busy ? ' is-busy' : ''}`}>
         <label htmlFor="chat-input" className="sr-only">Message Coach</label>
-        <textarea id="chat-input" ref={input} rows={1} maxLength={MAX_MESSAGE_LENGTH} value={draft} placeholder={busy ? 'Coach is answering…' : 'Ask Coach, or say “add Murray over 20.5 points”'}
+        <textarea id="chat-input" ref={input} rows={1} maxLength={MAX_MESSAGE_LENGTH} value={draft} placeholder={busy ? 'Coach is answering…' : 'Ask Coach anything — injuries, news, props, or “add Murray over 20.5 points”'}
           readOnly={busy} aria-disabled={busy || undefined} aria-describedby="chat-hint" spellCheck
           onChange={event => setDraft(event.target.value.slice(0, MAX_MESSAGE_LENGTH))} onKeyDown={onComposerKey} />
         {busy

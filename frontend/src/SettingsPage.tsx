@@ -45,7 +45,10 @@ export function AppearanceSettings({ theme, onTheme }: { theme: Theme; onTheme: 
 
 const llmOptions: { title: string; note?: string; lines: string[] }[] = [
   { title: 'OpenAI', lines: ['COURTSIDE_LLM_MODEL=gpt-4o-mini', 'COURTSIDE_LLM_API_KEY=sk-...'] },
+  { title: 'Anthropic', note: 'Uses Anthropic’s OpenAI-compatible endpoint. Pick a model id from Anthropic’s model list.', lines: ['COURTSIDE_LLM_MODEL=<claude-model-id>', 'COURTSIDE_LLM_BASE_URL=https://api.anthropic.com/v1', 'COURTSIDE_LLM_API_KEY=sk-ant-...'] },
+  { title: 'OpenRouter', note: 'One key, many models (openrouter.ai/models).', lines: ['COURTSIDE_LLM_MODEL=openai/gpt-4o-mini', 'COURTSIDE_LLM_BASE_URL=https://openrouter.ai/api/v1', 'COURTSIDE_LLM_API_KEY=sk-or-...'] },
   { title: 'A local model with Ollama', note: 'Run “ollama pull llama3.1” first. Nothing leaves this computer.', lines: ['COURTSIDE_LLM_MODEL=llama3.1', 'COURTSIDE_LLM_BASE_URL=http://127.0.0.1:11434/v1'] },
+  { title: 'A local model with LM Studio', note: 'Load a model and start LM Studio’s local server first. Nothing leaves this computer.', lines: ['COURTSIDE_LLM_MODEL=<model id shown in LM Studio>', 'COURTSIDE_LLM_BASE_URL=http://127.0.0.1:1234/v1'] },
   { title: 'Azure OpenAI (v1) or another OpenAI-compatible server', lines: ['COURTSIDE_LLM_MODEL=<deployment-name>', 'COURTSIDE_LLM_BASE_URL=https://<resource>.openai.azure.com/openai/v1', 'COURTSIDE_LLM_API_KEY=<key>', 'COURTSIDE_LLM_KEY_HEADER=api-key'] },
 ];
 
@@ -90,7 +93,8 @@ export function CoachSettings({ chat, learning, onOpenCoach }: { chat: ChatState
             <RichText text={status.detail} />
             {status.endpoint && <p className="engine-endpoint">Endpoint: <code>{status.endpoint}</code></p>}
           </> : statusError ? <p>The assistant status couldn’t be loaded. {statusError}</p> : <Busy text="Checking which engine is answering…" />}
-          <p className="engine-promise">Either way, every number comes from COURTSIDE’s own forecast and parlay tools.</p>
+          <p className="engine-scope">The built-in coach answers on its own: news, injuries, schedules and lines, teams, coaches, standings, betting math and questions about the app, as well as slip commands, price checks and grading.</p>
+          <p className="engine-promise">Either way, every number comes from COURTSIDE’s own tools: its forecasts, parlay math and the league feeds it reads.</p>
         </div>
       </div>
       <div className="settings-actions">
@@ -100,7 +104,7 @@ export function CoachSettings({ chat, learning, onOpenCoach }: { chat: ChatState
       <h3 className="settings-subtitle"><KeyRound size={17} aria-hidden="true" />{status?.mode === 'llm' ? 'Change the language model' : 'Connect a language model (optional)'}</h3>
       <ol className="llm-steps">
         <li>Copy <code>.env.example</code> in the COURTSIDE folder to <code>.env</code>. It stays on this computer and out of git.</li>
-        <li>Fill in one option:
+        <li>Fill in one option with <code>COURTSIDE_LLM_MODEL</code>, plus <code>COURTSIDE_LLM_API_KEY</code> and <code>COURTSIDE_LLM_BASE_URL</code> where needed:
           <div className="llm-options">{llmOptions.map(option => <div key={option.title} className="llm-option">
             <strong>{option.title}</strong>
             {option.note && <small>{option.note}</small>}
@@ -109,7 +113,7 @@ export function CoachSettings({ chat, learning, onOpenCoach }: { chat: ChatState
         </li>
         <li>Restart COURTSIDE with <code>Start.ps1</code>, then press <strong>Check again</strong>.</li>
       </ol>
-      <p className="record-hint">Without a model, the built-in coach still handles commands, slip building, price checks and grading. A model only adds open-ended answers.</p>
+      <p className="record-hint">A language model is optional. It adds free-form conversation on top of the built-in coach, and it can only get facts by calling the app’s tools, so every number still comes from COURTSIDE. If the model can’t be reached, the built-in coach answers instead.</p>
     </section>
     <section className="card settings-card" aria-labelledby="coach-memory-title">
       <SectionHeading id="coach-memory-title" eyebrow="MEMORY" title="What Coach remembers" headingRef={memoryHeading} />

@@ -117,7 +117,7 @@
 /* Loading surfaces */
 .skeleton-row > span, .skeleton-chart { animation: shimmer 1.4s ease-in-out infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
-.scoreboard-status.live > span { animation: led-pulse .9s ease-in-out infinite; }
+.scoreboard-status.live > span, .live-dot { animation: led-pulse .9s ease-in-out infinite; }
 @keyframes led-pulse { 50% { opacity: .25; } }
 
 /* Hover: a quick dribble on button icons, a finger-spin on the slip ball */
@@ -151,5 +151,5 @@
   .swish:not(.is-static) { animation: calm-pulse 1.6s ease-in-out infinite !important; }
   .swish:not(.is-static) .swish-ball-x { transform: translateX(60px); }
   .swish:not(.is-static) .swish-ball-y { transform: translateY(44px); }
-  .dribble, .scoreboard-status.live > span, .skeleton-row > span, .skeleton-chart { animation: calm-pulse 1.6s ease-in-out infinite !important; }
+  .dribble, .scoreboard-status.live > span, .live-dot, .skeleton-row > span, .skeleton-chart { animation: calm-pulse 1.6s ease-in-out infinite !important; }
 }

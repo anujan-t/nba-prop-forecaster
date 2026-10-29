@@ -1,4 +1,4 @@
-/* COURTSIDE newsroom: headlines, the injury report, team scouting reports and roster moves. */
+/* COURTSIDE newsroom: headlines, games and lines, the injury report, team scouting reports and roster moves. */
 
 .news-panel .section-heading { margin-bottom: 10px; }
 .news-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
@@ -139,6 +139,58 @@
 .player-news > p strong { color: var(--ink); }
 .player-news .text-button { white-space: nowrap; }
 
+/* Games and lines (News › Games, the team page and Coach's game cards) */
+.games-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-bottom: 12px; }
+.games-day { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--ink-2); font-size: 14px; font-weight: 600; }
+.games-day > svg { align-self: center; color: var(--orange-ink); }
+.games-day strong { color: var(--ink); font-family: var(--font-display); font-size: 22px; letter-spacing: .03em; line-height: 1.1; text-transform: uppercase; }
+.games-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.games-nav .secondary-button[aria-disabled="true"] { opacity: .55; cursor: default; }
+.games-nav .secondary-button[aria-disabled="true"]:hover { border-color: var(--line-strong); color: var(--ink); }
+.game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin: 0 0 16px; padding: 0; list-style: none; }
+.game-grid > li { display: flex; min-width: 0; }
+.game-grid > li > .game-card { flex: 1; }
+
+.game-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); }
+.game-card.state-in { border-left: 4px solid var(--danger); }
+.game-card.compact { gap: 8px; padding: 10px 12px; border-radius: 12px; }
+.game-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; color: var(--ink-2); font-size: 13px; font-weight: 600; }
+.game-state { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.game-state small { color: var(--muted); font-size: 12px; }
+.game-state.live { align-items: center; gap: 6px; color: var(--danger); font-weight: 700; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.game-clock { color: var(--ink-2); font-family: var(--font-score); font-weight: 600; }
+.game-note { padding: 2px 9px; border-radius: 999px; background: var(--royal-soft); color: var(--royal); font-size: 11.5px; font-weight: 700; }
+.game-sides { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.game-sides > li { display: grid; grid-template-columns: 14px auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.game-at { color: var(--muted); font-family: var(--font-score); font-size: 12px; font-weight: 700; text-align: center; }
+.game-team-name { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.game-team-name > span { overflow: hidden; color: var(--ink); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.game-team-name small { color: var(--muted); font-family: var(--font-score); font-size: 12px; }
+.game-score { font-family: var(--font-score); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.game-card.compact .game-score { font-size: 18px; }
+.game-sides > li.loser :is(.game-score, .game-team-name > span) { color: var(--ink-2); font-weight: 500; }
+
+.game-odds { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.game-lines { width: 100%; border-collapse: separate; border-spacing: 0; border-radius: 10px; background: var(--surface); font-size: 13px; font-variant-numeric: tabular-nums; }
+.game-lines th, .game-lines td { padding: 4px 8px; text-align: left; vertical-align: baseline; }
+.game-lines thead th { padding-top: 6px; padding-bottom: 0; color: var(--muted); font-family: var(--font-display); font-size: 11.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+.game-lines tbody tr:last-child > * { padding-bottom: 6px; }
+.game-lines tbody th { color: var(--ink-2); font-family: var(--font-score); font-size: 12.5px; font-weight: 700; }
+.game-lines td { color: var(--ink); font-family: var(--font-score); font-weight: 600; }
+.game-line { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; }
+.game-line small { color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.game-provider, .game-no-lines, .game-broadcast { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.game-broadcast { display: flex; align-items: center; gap: 6px; }
+.game-injuries { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
+.game-injury summary { color: var(--ink-2); font-size: 13px; line-height: 1.5; cursor: pointer; }
+.game-injury summary > svg { margin-right: 5px; color: var(--danger); vertical-align: -2px; }
+.game-injury summary strong { color: var(--ink); font-family: var(--font-score); font-size: 12.5px; }
+.game-injury ul { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 6px 0 4px 18px; list-style: none; }
+.game-injury li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 13px; }
+.game-injury li small { color: var(--muted); font-size: 12px; }
+.next-game .game-card { max-width: 560px; }
+
 @media (max-width: 1000px) {
   .team-detail-grid { grid-template-columns: minmax(0, 1fr); }
   .news-card.lead { grid-template-columns: minmax(0, 1fr); }
@@ -146,7 +198,7 @@
 }
 @media (max-width: 640px) {
   .injury-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .news-list { grid-template-columns: minmax(0, 1fr); }
+  .news-list, .game-grid { grid-template-columns: minmax(0, 1fr); }
   .play-types > li { grid-template-columns: minmax(0, 1fr) auto; }
   .play-bar { grid-column: 1 / -1; grid-row: 2; }
   .staff ul { grid-template-columns: minmax(0, 1fr); }

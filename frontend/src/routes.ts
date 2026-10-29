@@ -5,7 +5,7 @@ import type { MouseEvent } from 'react';
  * #/how-it-works/{section}, #/settings/{section}. */
 export type Tab = 'players' | 'parlay' | 'bets' | 'news' | 'coach';
 export type PlayerSection = 'props' | 'log' | 'career' | 'lines';
-export type NewsSection = 'headlines' | 'injuries' | 'teams' | 'moves';
+export type NewsSection = 'headlines' | 'games' | 'injuries' | 'teams' | 'moves';
 export type HowSection = 'method' | 'accuracy';
 export type SettingsSection = 'appearance' | 'model' | 'data' | 'coach';
 
@@ -21,7 +21,7 @@ export type Route =
 export type Page = Route['page'];
 
 export const playerSections: readonly PlayerSection[] = ['props', 'log', 'career', 'lines'];
-export const newsSections: readonly NewsSection[] = ['headlines', 'injuries', 'teams', 'moves'];
+export const newsSections: readonly NewsSection[] = ['headlines', 'games', 'injuries', 'teams', 'moves'];
 export const howSections: readonly HowSection[] = ['method', 'accuracy'];
 export const settingsSections: readonly SettingsSection[] = ['appearance', 'model', 'data', 'coach'];
 

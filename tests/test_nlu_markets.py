@@ -53,6 +53,24 @@ class MarketParsingTests(unittest.TestCase):
         self.assertIsNone(nlu.parse_leg("Jokic over 3 minutes").stat)
         self.assertEqual(nlu.parse_leg("Jokic over 3 minutes").unsupported, "minutes")
 
+    def test_over_or_under_asks_about_both_sides(self):
+        for text, stat in (("over or under 23.5?", None), ("should i be over or under 23.5 points for curry?", "points"),
+                           ("o/u 23.5 pts", "points"), ("Curry over/under 23.5", None), ("under or over 23.5 points", "points")):
+            with self.subTest(text=text):
+                spec = nlu.parse_leg(text)
+                self.assertEqual((spec.stat, spec.side, spec.line), (stat, None, 23.5))
+        self.assertEqual(nlu.parse_leg("the under?").side, "under")
+
+    def test_a_bare_number_is_a_line_only_on_request(self):
+        self.assertIsNone(nlu.parse_leg("what about 25.5?").line)
+        self.assertEqual(nlu.parse_leg("what about 25.5?", bare_number=True).line, 25.5)
+        self.assertEqual(nlu.parse_leg("what about 25.5 at -115?", bare_number=True).line, 25.5)
+
+    def test_player_names_are_not_markets(self):
+        self.assertEqual(nlu.parse_leg("add Trey Murphy III over 20.5 points").stat, "points")
+        self.assertIsNone(nlu.parse_leg("Trey Lyles over 6.5").stat)
+        self.assertEqual(nlu.parse_leg("Curry over 4.5 treys").stat, "threes")
+
 
 if __name__ == "__main__":
     unittest.main()

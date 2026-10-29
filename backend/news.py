@@ -7,7 +7,7 @@ requests. Failures are reported; the app falls back to the last saved copy and s
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import re
 from typing import Callable
 
@@ -29,7 +29,12 @@ ESPN_TEAMS = {
     "20": "PHI", "21": "PHX", "22": "POR", "23": "SAC", "24": "SAS", "25": "OKC", "26": "UTA", "27": "WAS", "28": "TOR",
     "29": "MEM", "30": "CHA",
 }
+ESPN_IDS = {code: espn_id for espn_id, code in ESPN_TEAMS.items()}
 ESPN_ABBREVIATIONS = {"GS": "GSW", "NO": "NOP", "NY": "NYK", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
+CONFERENCES = {
+    **dict.fromkeys(("ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DET", "IND", "MIA", "MIL", "NYK", "ORL", "PHI", "TOR", "WAS"), "East"),
+    **dict.fromkeys(("DAL", "DEN", "GSW", "HOU", "LAC", "LAL", "MEM", "MIN", "NOP", "OKC", "PHX", "POR", "SAC", "SAS", "UTA"), "West"),
+}
 KINDS = ("injury", "transaction", "coaching", "game", "betting", "other")
 KIND_PATTERNS = (
     ("injury", re.compile(r"\b(injur\w*|ruled out|rule out|rules out|questionable|doubtful|probable|day-to-day|week-to-week|"
@@ -119,8 +124,14 @@ def match_player(directory: dict[tuple[str, str], str], name: str | None, team: 
     return None
 
 
-def fetch_headlines(roster: list[dict] | None = None, limit: int = 60) -> dict:
-    data = _get("news", {"limit": limit})
+def fetch_headlines(roster: list[dict] | None = None, limit: int = 60, team: str | None = None) -> dict:
+    """League headlines, or one team's (ESPN filters by its team id) when `team` is an NBA abbreviation."""
+    params: dict = {"limit": limit}
+    if team:
+        if team not in ESPN_IDS:
+            raise ValueError(f"Unknown NBA team {team!r}.")
+        params["team"] = ESPN_IDS[team]
+    data = _get("news", params)
     articles = data.get("articles")
     if not isinstance(articles, list):
         raise NewsUnavailableError("ESPN's headline feed changed its format; no headlines were read.")
@@ -209,6 +220,101 @@ def fetch_transactions(limit: int = 60) -> dict:
                       "team_name": _text(team.get("displayName"))})
     items.sort(key=lambda item: item.get("date") or "", reverse=True)
     return {"transactions": items, "provider": "ESPN public NBA transactions feed (unofficial JSON)"}
+
+
+def _american(value) -> int | None:
+    text = (_text(value) or "").replace("−", "-").upper()
+    if text in ("EVEN", "EV"):
+        return 100
+    try:
+        number = int(float(text))
+    except ValueError:
+        return None
+    return number if 100 <= abs(number) <= 100000 else None
+
+
+def _line(value) -> float | None:
+    """A spread or total such as "-1.5", "+3", "o237.5" or 237.5."""
+    text = (_text(value) or "").replace("−", "-").lower().lstrip("ou")
+    if text in ("pk", "pick", "even"):
+        return 0.0
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if abs(number) < 1000 else None
+
+
+def _game_odds(items, home: str, away: str) -> dict | None:
+    """The first sportsbook ESPN lists: spread, total and moneyline (closing number when given, else the opener)."""
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        return None
+    item = items[0]
+
+    def price(market: str, side: str, field: str) -> str | None:
+        entry = ((item.get(market) or {}).get(side) or {})
+        return (entry.get("close") or {}).get(field) or (entry.get("open") or {}).get(field)
+
+    home_spread = _line(price("pointSpread", "home", "line"))
+    if home_spread is None:
+        home_spread = _line(item.get("spread"))
+    away_spread = _line(price("pointSpread", "away", "line"))
+    if away_spread is None and home_spread is not None:
+        away_spread = -home_spread
+    total = _line(price("total", "over", "line"))
+    if total is None:
+        total = _line(item.get("overUnder"))
+    favorite = home if (item.get("homeTeamOdds") or {}).get("favorite") else away if (item.get("awayTeamOdds") or {}).get("favorite") else None
+    odds = {
+        "provider": _text((item.get("provider") or {}).get("name")), "details": _text(item.get("details")),
+        "home_spread": home_spread, "away_spread": away_spread, "total": total, "favorite": favorite,
+        "home_moneyline": _american(price("moneyline", "home", "odds")), "away_moneyline": _american(price("moneyline", "away", "odds")),
+        "home_spread_odds": _american(price("pointSpread", "home", "odds")), "away_spread_odds": _american(price("pointSpread", "away", "odds")),
+        "over_odds": _american(price("total", "over", "odds")), "under_odds": _american(price("total", "under", "odds")),
+    }
+    if odds["home_spread"] is None and odds["total"] is None and odds["home_moneyline"] is None:
+        return None
+    return odds
+
+
+def fetch_scoreboard(day: date) -> dict:
+    """One day's games (US Eastern date): matchup, start time, status, records, scores and the listed betting lines."""
+    data = _get("scoreboard", {"dates": day.strftime("%Y%m%d")})
+    events = data.get("events")
+    if not isinstance(events, list):
+        raise NewsUnavailableError("ESPN's scoreboard changed its format; no games were read.")
+    games = []
+    for event in events:
+        competition = (event.get("competitions") or [{}])[0] or {}
+        status = ((event.get("status") or competition.get("status") or {}).get("type")) or {}
+        state = status.get("state") if status.get("state") in ("pre", "in", "post") else "pre"
+        sides: dict[str, dict] = {}
+        for competitor in competition.get("competitors") or []:
+            team = competitor.get("team") or {}
+            code = ESPN_TEAMS.get(str(team.get("id"))) or nba_abbreviation(team.get("abbreviation"))
+            records = competitor.get("records") or []
+            overall = next((r.get("summary") for r in records if r.get("type") == "total" or r.get("name") == "overall"), None)
+            score = str(competitor.get("score") or "")
+            sides[competitor.get("homeAway")] = {
+                "team": code, "name": _text(team.get("displayName")) or code, "record": _text(overall),
+                "score": int(score) if state != "pre" and score.isdigit() else None,
+                "winner": bool(competitor.get("winner")) if state == "post" else None,
+            }
+        if "home" not in sides or "away" not in sides or not sides["home"]["team"] or not sides["away"]["team"]:
+            continue
+        broadcasts = [name for item in competition.get("broadcasts") or [] for name in item.get("names") or []]
+        games.append({
+            "id": str(event.get("id")), "start": event.get("date"), "state": state,
+            "detail": _text(status.get("shortDetail")) or _text(status.get("detail")),
+            "home": sides["home"], "away": sides["away"],
+            "odds": _game_odds(competition.get("odds"), sides["home"]["team"], sides["away"]["team"]) if state == "pre" else None,
+            "broadcast": ", ".join(dict.fromkeys(broadcasts)) or None,
+            "venue": _text((competition.get("venue") or {}).get("fullName")),
+            "note": next((_text(note.get("headline")) for note in competition.get("notes") or [] if _text(note.get("headline"))), None),
+        })
+    games.sort(key=lambda game: (game["start"] or "", game["away"]["team"]))
+    return {"date": day.isoformat(), "games": games,
+            "provider": "ESPN public NBA scoreboard (unofficial JSON); game lines are the sportsbook ESPN lists, shown for reference"}
 
 
 # ---------- NBA Stats: coaches and playing styles ----------

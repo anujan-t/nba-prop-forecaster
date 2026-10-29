@@ -1,5 +1,6 @@
+import type { CoachEntry, Game, NewsArticle, Transaction } from './news-types';
 import type { FairOdds, ParlayLegRequest, ParlayResult, Side } from './parlay-types';
-import type { Model, Stat } from './types';
+import type { InjuryEntry, Model, Stat } from './types';
 
 /**
  * API contract for the COURTSIDE assistant, the bet tracker and the learning loop.
@@ -104,7 +105,96 @@ export interface TrackRecordCard { type: 'track_record'; record: TrackRecord }
 export interface LearningCard { type: 'learning'; status: LearningStatus }
 export interface BetCard { type: 'bet'; bet: TrackedBet }
 
-export type ChatCard = ForecastCard | ParlayCard | PlayerCard | TrackRecordCard | LearningCard | BetCard;
+// League and news cards. `route` is an in-app hash such as "#/news/teams/lal" or "#/how-it-works/accuracy".
+
+/** A headline as Coach sends it: the news feed's article without images or athletes. */
+export type ChatArticle = Pick<NewsArticle, 'id' | 'headline' | 'description' | 'published' | 'url' | 'kind' | 'teams' | 'byline'>;
+
+export interface NewsCard {
+  type: 'news';
+  title: string;
+  articles: ChatArticle[];
+  fetched_at: string | null;
+  stale: boolean; // a saved copy, shown because the feed failed
+  route: string;
+}
+
+/** An injury-report entry as Coach sends it (no long comment or headshot). */
+export type ChatInjury = Pick<InjuryEntry, 'player' | 'player_id' | 'position' | 'status' | 'status_key' | 'injury' | 'detail' | 'side' | 'return_date' | 'short_comment' | 'date'> & { team: string };
+
+export interface InjuriesCard {
+  type: 'injuries';
+  title: string;
+  entries: ChatInjury[]; // up to 30
+  total: number; // everyone who matched, even past the entries sent
+  fetched_at: string | null;
+  stale: boolean;
+  route: string;
+}
+
+export interface GamesCard {
+  type: 'games';
+  title: string;
+  date: string; // YYYY-MM-DD (US Eastern)
+  games: Game[];
+  route: string;
+}
+
+export interface TeamCard {
+  type: 'team';
+  team: string; // abbreviation, e.g. "LAL"
+  name: string;
+  season: string | null;
+  record: { wins: number; losses: number; seed: number | null; conference: string | null; games_back: number | null } | null;
+  head_coach: string | null;
+  summary: string | null; // one plain-English sentence on how they play
+  tags: string[];
+  metrics: { key: string; label: string; value: number; rank: number; percent: boolean }[]; // percent: value is a 0–1 fraction
+  play_types: { label: string; frequency: number; points_per_possession: number; frequency_rank: number }[]; // frequency 0–1
+  injuries: { player: string; status: string; status_key: InjuryEntry['status_key']; injury: string | null }[];
+  next_game: Game | null;
+  team_count: number | null; // ranks are out of this many teams
+  route: string;
+}
+
+export interface MatchupCard { type: 'matchup'; a: TeamCard; b: TeamCard; game: Game | null }
+
+export interface RankingCard {
+  type: 'ranking';
+  title: string;
+  metric: string;
+  label: string;
+  percent: boolean;
+  season: string;
+  rows: { team: string; name: string; label: string; value: number; rank: number; percent: boolean }[];
+  team_count: number;
+  route: string;
+}
+
+export interface StandingsCard {
+  type: 'standings';
+  season: string;
+  teams: { team: string; name: string; conference: 'East' | 'West' | null; wins: number; losses: number; pct: number; seed?: number; games_back?: number }[];
+  route: string;
+}
+
+export interface CoachesCard { type: 'coaches'; team: string; name: string; season: string | null; coaches: CoachEntry[]; route: string }
+
+export interface MovesCard {
+  type: 'moves';
+  title: string;
+  transactions: Transaction[];
+  route: string;
+  fetched_at: string | null;
+  stale: boolean;
+}
+
+/** A plain "Open …" button to a page in the app. */
+export interface LinkCard { type: 'link'; label: string; route: string }
+
+export type LeagueCard = NewsCard | InjuriesCard | GamesCard | TeamCard | MatchupCard | RankingCard | StandingsCard | CoachesCard | MovesCard | LinkCard;
+
+export type ChatCard = ForecastCard | ParlayCard | PlayerCard | TrackRecordCard | LearningCard | BetCard | LeagueCard;
 
 export interface ChatClarification {
   prompt: string; // e.g. "Which Williams?"
@@ -113,7 +203,7 @@ export interface ChatClarification {
 
 export interface ChatResponse {
   turn_id: string; // for feedback
-  reply: string; // plain text with **bold**, line breaks and "- " bullet lines only
+  reply: string; // plain text with **bold**, line breaks, "- " bullet lines and whole-line _asides_ only
   slip: ChatSlip | null; // the full updated slip when it changed; null when unchanged
   actions: ChatAction[];
   cards: ChatCard[];

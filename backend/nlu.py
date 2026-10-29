@@ -14,7 +14,7 @@ STAT_WORDS = {
     "points": ("points", "point", "pts", "pt", "pnts", "scoring", "buckets"),
     "rebounds": ("rebounds", "rebound", "rebs", "reb", "boards", "board"),
     "assists": ("assists", "assist", "asts", "ast", "dimes", "dime"),
-    "threes": ("threes", "3pm", "3s", "triples", "treys", "trey", "threepointers"),
+    "threes": ("threes", "3pm", "3s", "triples", "treys", "threepointers"),  # not "trey": Trey Murphy III, Trey Lyles, ...
     "steals": ("steals", "steal", "stl", "stls"),
     "blocks": ("blocks", "block", "blk", "blks", "swats", "rejections"),
     "turnovers": ("turnovers", "turnover", "tov", "tovs", "tos"),
@@ -233,6 +233,8 @@ class LegSpec:
     problem: str | None = None
 
 
+# "over or under 23.5?" asks about both sides of the line rather than picking one.
+EITHER_SIDE = re.compile(r"\b(?:over\s*(?:or|/|-)\s*under|under\s*(?:or|/|-)\s*over|o\s*/\s*u)\b")
 ODDS_CONTEXT = re.compile(r"\b(odds|price|priced|pays?|paying|offer(?:ed|ing|s)?|book|books|sportsbook|house|vig|juice|line is|"
                           r"at|ev|value|worth|implied|break.?even|payout|fair)\b")
 
@@ -328,12 +330,18 @@ def _prepare(text: str) -> str:
     return t
 
 
-def parse_leg(text: str) -> LegSpec:
-    """Stat, side and line from a phrase like "Jokić o26.5 pts", "10+ assists" or "under 11.5 boards"."""
+def parse_leg(text: str, bare_number: bool = False) -> LegSpec:
+    """Stat, side and line from a phrase like "Jokić o26.5 pts", "10+ assists" or "under 11.5 boards".
+
+    A number with no stat or side next to it ("what about 25.5?") is read as a line only when ``bare_number`` is set.
+    """
     _, t, _ = find_odds(text)
     t = _prepare(t)
     t = re.sub(r"\blegs?\s*#?\s*\d{1,2}\b|\$\s?\d+(?:\.\d+)?|\b\d+(?:\.\d+)?\s*(?:dollars|bucks|units)\b|\b\d{4}-\d{2}-\d{2}\b"
                r"|\b\d{1,2}/\d{1,2}\b|\b(?:last|past|previous)\s+\d{1,2}\s+games?\b|\bin\s+\d{1,2}\s+(?:of|out of)\s+\d{1,2}\b", " ", t)
+    either = EITHER_SIDE.search(t)
+    if either:
+        t = f"{t[:either.start()]} {t[either.end():]}"
     spec = LegSpec()
     tokens = re.findall(r"[a-z0-9+#]+|\d+\.\d+", t)
     for token in tokens:
@@ -357,14 +365,14 @@ def parse_leg(text: str) -> LegSpec:
             value = float(match.group(1))
             spec.side, spec.line = side, value + (shift if value.is_integer() or not whole_only else 0.0)
             break
-    if spec.side is None:
+    if spec.side is None and not either:
         if re.search(r"\b(?:the\s+)?overs?\b", t):
             spec.side = "over"
         elif re.search(r"\b(?:the\s+)?unders?\b", t):
             spec.side = "under"
     if spec.line is None:
         match = re.search(r"(?<![\d.+-])(\d{1,3}(?:\.\d+)?)(?![\d.%/])", t)
-        if match and (spec.stat or spec.side):
+        if match and (spec.stat or spec.side or either or bare_number):
             spec.line = float(match.group(1))
     if spec.line is not None and (spec.line < 0 or spec.line > 200 or spec.line * 2 != int(spec.line * 2)):
         spec.problem = f"{spec.line:g} is not a valid line: use a whole or half point from 0 to 200."
@@ -386,7 +394,7 @@ INTENTS = [
     ("greet", r"^\s*(?:hi|hey|hello|yo|sup|good (?:morning|afternoon|evening)|what'?s up)\b[\s!.?]*$"),
     ("track", r"\b(?:track|log|save|record)\s+(?:this|that|it|my|the|a)\b|\b(?:i (?:placed|took|locked in|put money on)|placed (?:it|this|the|my|a)|wagered)\b"),
     ("forget", r"^\s*forget\s+\S"),
-    ("settle", r"\b(?:grade|settle)\b|\b(?:track record|my record|results|how did (?:my|i|it|the)|did (?:my|i|it) (?:win|hit|cash)|how am i doing|my bets|bet history|performance)\b"),
+    ("settle", r"\b(?:grade|settle)\b|\b(?:track record|my record|my results|bet results|how did (?:my|i)\b|how did (?:it|the) (?:bet|parlay|slip|legs?)\b|did (?:my|i|it) (?:win|hit|cash)|how am i doing|my bets|bet history|my performance)\b"),
     ("learning", r"\b(?:smarter|learn(?:ing|ed|s)?|calibrat\w*|getting better|improv\w*|train\w*)\b"),
     ("remove", r"\b(?:remove|delete|drop|scratch|take (?:off|out)|get rid of|cut)\b"),
     ("update", r"\b(?:flip|switch|swap|change|move|bump|raise|lower)\b|\bmake (?:it|that|leg|the)\b|\bset (?:leg|the line|it|that)\b"),

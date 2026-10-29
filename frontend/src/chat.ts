@@ -25,7 +25,8 @@ export interface Conversation { id: string; messages: ChatMessage[] }
 /** Action types that change the slip, so "undo" can take them back. */
 export const slipActions: ReadonlySet<ChatActionType> = new Set(['add_leg', 'replace_leg', 'remove_leg', 'update_leg', 'set_book_odds', 'clear_slip']);
 const actionTypes: ReadonlySet<string> = new Set([...slipActions, 'undo', 'track_bet']);
-const cardTypes: ReadonlySet<string> = new Set(['forecast', 'parlay', 'player', 'track_record', 'learning', 'bet']);
+const cardTypes: ReadonlySet<string> = new Set(['forecast', 'parlay', 'player', 'track_record', 'learning', 'bet',
+  'news', 'injuries', 'games', 'team', 'matchup', 'ranking', 'standings', 'coaches', 'moves', 'link']);
 const idAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 export function randomId(length = 20): string {
@@ -57,6 +58,11 @@ function strings(value: unknown, limit: number, length = 400): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.slice(0, length)).slice(0, limit) : [];
 }
 
+function isTeamCard(value: unknown): boolean {
+  return isRecord(value) && typeof value.team === 'string' && typeof value.name === 'string' && Array.isArray(value.tags)
+    && Array.isArray(value.metrics) && Array.isArray(value.play_types) && Array.isArray(value.injuries);
+}
+
 function validCard(card: unknown): card is ChatCard {
   if (!isRecord(card) || typeof card.type !== 'string' || !cardTypes.has(card.type)) return false;
   switch (card.type) {
@@ -66,6 +72,16 @@ function validCard(card: unknown): card is ChatCard {
     case 'track_record': return isRecord(card.record);
     case 'learning': return isRecord(card.status) && isRecord(card.status.calibration) && isRecord(card.status.memory) && isRecord(card.status.record);
     case 'bet': return isRecord(card.bet) && Array.isArray(card.bet.legs);
+    case 'news': return typeof card.title === 'string' && Array.isArray(card.articles);
+    case 'injuries': return typeof card.title === 'string' && Array.isArray(card.entries);
+    case 'games': return typeof card.title === 'string' && typeof card.date === 'string' && Array.isArray(card.games);
+    case 'team': return isTeamCard(card);
+    case 'matchup': return isTeamCard(card.a) && isTeamCard(card.b);
+    case 'ranking': return typeof card.title === 'string' && Array.isArray(card.rows);
+    case 'standings': return Array.isArray(card.teams);
+    case 'coaches': return typeof card.name === 'string' && Array.isArray(card.coaches);
+    case 'moves': return typeof card.title === 'string' && Array.isArray(card.transactions);
+    case 'link': return typeof card.label === 'string' && typeof card.route === 'string';
     default: return false;
   }
 }
@@ -163,9 +179,9 @@ export function saveConversation(conversation: Conversation): void {
   }
 }
 
-// ---------- Reply text: **bold**, line breaks and "- " bullet lines only ----------
+// ---------- Reply text: **bold**, line breaks, "- " bullet lines and whole-line _asides_ only ----------
 
-export interface InlineRun { text: string; bold: boolean }
+export interface InlineRun { text: string; bold: boolean; italic?: boolean }
 export type RichBlock = { type: 'paragraph'; lines: InlineRun[][] } | { type: 'list'; items: InlineRun[][] };
 
 function inline(line: string): InlineRun[] {
@@ -178,6 +194,12 @@ function inline(line: string): InlineRun[] {
   return parts.map((text, index) => ({ text, bold: index % 2 === 1 })).filter(run => run.text.length > 0);
 }
 
+/** A whole line wrapped in single underscores is an aside, e.g. "_Report updated 2 hr ago._". Underscores inside a line stay literal. */
+function lineRuns(line: string): InlineRun[] {
+  const aside = /^_([^_\s](?:.*[^_\s])?)_$/.exec(line);
+  return aside ? inline(aside[1]).map(run => ({ ...run, italic: true })) : inline(line);
+}
+
 export function parseRichText(text: string): RichBlock[] {
   const blocks: RichBlock[] = [];
   let paragraph: InlineRun[][] | null = null;
@@ -188,13 +210,13 @@ export function parseRichText(text: string): RichBlock[] {
     if (bullet) {
       paragraph = null;
       if (!list) { list = []; blocks.push({ type: 'list', items: list }); }
-      list.push(inline(bullet[1].trim()));
+      list.push(lineRuns(bullet[1].trim()));
       continue;
     }
     list = null;
     if (!line.trim()) { paragraph = null; continue; }
     if (!paragraph) { paragraph = []; blocks.push({ type: 'paragraph', lines: paragraph }); }
-    paragraph.push(inline(line.trim()));
+    paragraph.push(lineRuns(line.trim()));
   }
   return blocks;
 }

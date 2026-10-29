@@ -16,9 +16,13 @@ if (-not $Python) {
 if (-not (Test-Path -LiteralPath "frontend\dist\index.html")) {
     throw "Build the frontend first: cd frontend; npm ci; npm run build. See RUNNING.txt."
 }
-# Optional settings (e.g. a language model for the coach) from a git-ignored .env file: KEY=VALUE lines.
-if (Test-Path -LiteralPath ".env") {
-    foreach ($line in Get-Content -LiteralPath ".env") {
+# Optional settings (e.g. a language model for the coach), KEY=VALUE lines: a git-ignored .env file here, then
+# %LOCALAPPDATA%\Courtside\courtside.env, which stays outside synced folders such as OneDrive (use it for API keys).
+$envFiles = @(".env")
+if ($env:LOCALAPPDATA) { $envFiles += (Join-Path $env:LOCALAPPDATA "Courtside\courtside.env") }
+foreach ($envFile in $envFiles) {
+    if (-not (Test-Path -LiteralPath $envFile)) { continue }
+    foreach ($line in Get-Content -LiteralPath $envFile) {
         if ($line -match '^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$' -and $line -notmatch '^\s*#') {
             [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim('"').Trim("'"), "Process")
         }

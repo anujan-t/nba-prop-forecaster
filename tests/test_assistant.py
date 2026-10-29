@@ -270,11 +270,93 @@ class QuestionTests(CoachTestCase):
         self.assertEqual(learning["cards"][0]["type"], "learning")
 
     def test_help_unknown_and_wellbeing(self):
-        self.assertIn("Build the slip", self.say("help")["reply"])
+        self.assertIn("Build & price the slip", self.say("help")["reply"])
         unknown = self.say("purple monkey dishwasher")
         self.assertIn("didn't catch", unknown["reply"])
         self.assertTrue(unknown["suggestions"])
         self.assertIn("1-800-GAMBLER", self.say("I keep chasing my losses, what are my odds")["reply"])
+
+
+class FollowUpTests(CoachTestCase):
+    def test_a_bare_stat_answers_which_stat(self):
+        asked = self.say("should i bet on jamal murray over 20.5 tonight")
+        self.assertIn("Which stat for Jamal Murray?", asked["reply"])
+        self.assertIn("add Jamal Murray over 20.5 points", asked["suggestions"])
+        self.assertEqual(self.slip["legs"], [])
+        answered = self.say("points")
+        self.assertEqual(self.legs(), [("Jamal Murray", "points", "over", 20.5)])
+        self.assertIn("Added leg 1", answered["reply"])
+
+    def test_short_replies_finish_a_missing_line_or_side(self):
+        self.assertIn("What line", self.say("add jokic rebounds")["reply"])
+        self.assertIn("Over or under 12 rebounds", self.say("12")["reply"])
+        self.say("the under")
+        self.assertEqual(self.legs(), [("Nikola Jokić", "rebounds", "under", 12.0)])
+
+    def test_a_bare_line_follows_the_player_being_discussed(self):
+        self.assertEqual(self.say("how about curry")["cards"][0]["type"], "player")
+        both = self.say("over or under 25.5?")
+        card = both["cards"][0]
+        self.assertEqual((card["type"], card["player"]["name"], card["stat"], card["line"], card["side"]),
+                         ("forecast", "Stephen Curry", "points", 25.5, None))
+        self.assertIn("Assuming you mean **points**", both["reply"])
+        self.assertRegex(both["reply"], r"the model leans \*\*(?:over|under)\*\*|close to a coin flip")
+        self.assertIsNone(both["slip"])
+        under = self.say("what about the under?")["cards"][0]
+        self.assertEqual((under["player"]["name"], under["stat"], under["line"], under["side"]), ("Stephen Curry", "points", 25.5, "under"))
+        higher = self.say("and 27.5?")
+        self.assertEqual((higher["cards"][0]["stat"], higher["cards"][0]["line"]), ("points", 27.5))
+        self.assertNotIn("Assuming", higher["reply"])
+        self.say("over 27.5")
+        self.assertEqual(self.legs(), [("Stephen Curry", "points", "over", 27.5)])
+
+    def test_an_ambiguous_line_asks_which_stat_then_takes_a_bare_reply(self):
+        self.frames["1630178"] = self.frames["1630178"].assign(rebounds=5, assists=5)
+        self.say("what's tyrese maxey averaging?")
+        asked = self.say("over 4.5?")
+        self.assertIn("Which stat for Tyrese Maxey at 4.5?", asked["reply"])
+        self.assertEqual(asked["cards"], [])
+        self.assertIn("Tyrese Maxey over 4.5 rebounds?", asked["suggestions"])
+        card = self.say("assists")["cards"][0]
+        self.assertEqual((card["player"]["name"], card["stat"], card["line"], card["side"]), ("Tyrese Maxey", "assists", 4.5, "over"))
+        self.assertEqual(self.slip["legs"], [])
+
+    def test_new_requests_are_not_read_as_follow_ups(self):
+        self.say("how about curry")
+        self.assertNotIn("Stephen Curry", self.say("who has the most rebounds?")["reply"])
+        self.say("how about curry")
+        self.assertIn("10 or more in two of", self.say("what's a double-double?")["reply"])
+        self.say("how about curry")
+        self.say("add jokic over 26.5 points")
+        self.assertEqual(self.legs(), [("Nikola Jokić", "points", "over", 26.5)])
+        self.assertEqual(self.say("what are my odds?")["cards"][0]["type"], "parlay")
+        self.say("how about curry")
+        self.say("remove leg 1")
+        self.assertEqual(self.slip["legs"], [])
+        self.say("how about curry")
+        self.assertIn("didn't", self.say("purple monkey dishwasher")["reply"])
+        self.assertNotIn("Stephen Curry", self.say("over or under 25.5?", conversation="conv-test-2")["reply"])
+
+    def test_a_question_after_a_prompt_is_answered_not_added(self):
+        self.say("should i bet on jamal murray over 20.5 tonight")
+        definition = self.say("what's PRA?")
+        self.assertIn("points + rebounds + assists", definition["reply"])
+        self.assertEqual(self.slip["legs"], [])
+        self.say("add jokic over or under 12.5 rebounds")
+        hit_rate = self.say("what's the over hit rate?")
+        self.assertEqual((hit_rate["cards"][0]["type"], hit_rate["cards"][0]["stat"]), ("forecast", "rebounds"))
+        self.assertEqual(self.slip["legs"], [])
+        self.frames["1630178"] = self.frames["1630178"].assign(rebounds=5, assists=5)
+        self.say("what's tyrese maxey averaging?")
+        self.say("over 4.5?")
+        self.say("add assists")
+        self.assertEqual(self.legs(), [("Tyrese Maxey", "assists", "over", 4.5)])
+
+    def test_the_market_being_discussed_carries_to_a_new_line(self):
+        self.frames["201939"] = self.frames["201939"].assign(turnovers=lambda frame: frame["assists"] // 2)
+        self.say("stephen curry over 2.5 turnovers?")
+        card = self.say("what about 3.5?")["cards"][0]
+        self.assertEqual((card["stat"], card["line"]), ("turnovers", 3.5))
 
 
 class HouseMathTests(unittest.TestCase):
@@ -319,7 +401,7 @@ class LanguageModelTests(CoachTestCase):
         self.assertEqual(len(seen), 3)
         self.assertEqual(seen[0]["tools"][0]["function"]["name"], "get_slip")
         self.assertEqual(seen[1]["messages"][-1]["role"], "tool")
-        self.assertIn("never estimate or invent", seen[0]["messages"][0]["content"])
+        self.assertIn("never answer current NBA facts from memory", seen[0]["messages"][0]["content"])
 
     def test_failures_fall_back_to_the_built_in_coach(self):
         def broken(request):
@@ -327,7 +409,7 @@ class LanguageModelTests(CoachTestCase):
         self.coach.llm = LLMClient("http://127.0.0.1:9/v1", "local", transport=httpx.MockTransport(broken))
         response = self.say("build me something spicy")
         self.assertEqual(response["engine"]["mode"], "built_in")
-        self.assertIn("didn't catch", response["reply"])
+        self.assertIn("Parlay tab", response["reply"])
         status = self.coach.status()
         self.assertFalse(status["ready"])
         self.assertNotIn("sk-", json.dumps(status))
@@ -355,6 +437,28 @@ class LanguageModelTests(CoachTestCase):
         error = LLMClient("https://llm.example/v1", "m", transport=httpx.MockTransport(lambda r: httpx.Response(401, json={})))
         with self.assertRaisesRegex(LLMError, "HTTP 401"):
             error.complete([], [])
+
+    def test_models_without_temperature_and_safe_error_codes(self):
+        calls = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            calls.append(body)
+            if "temperature" in body:
+                return httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature' does not support 0.2.",
+                                                           "code": "unsupported_value"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+        client = LLMClient("https://llm.example/v1", "m", "sk-test", transport=httpx.MockTransport(handler))
+        self.assertEqual(client.complete([], [])["content"], "ok")
+        client.complete([], [])
+        self.assertEqual(["temperature" in body for body in calls], [True, False, False])
+        denied = LLMClient("https://llm.example/v1", "m", "sk-secret", transport=httpx.MockTransport(lambda r: httpx.Response(
+            401, json={"error": {"message": "Incorrect API key provided: sk-secr***cret.", "code": "invalid_api_key"}})))
+        with self.assertRaises(LLMError) as raised:
+            denied.complete([], [])
+        self.assertIn("HTTP 401 (invalid_api_key)", str(raised.exception))
+        self.assertNotIn("sk-", str(raised.exception))
 
 
 if __name__ == "__main__":

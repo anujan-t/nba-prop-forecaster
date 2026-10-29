@@ -277,9 +277,10 @@ PARLAY BUILDER
   Research only: probabilities, not certainties; no wagering is automated.
 
 COURTSIDE COACH (CHAT)
-  A chat panel on every view. It works offline with no setup: a built-in
-  parser understands slip commands and common questions and calls the same
-  forecast, parlay and history code as the UI.
+  A chat panel on every view that answers any NBA betting question about the
+  league or the app. It works offline with no setup: a built-in parser
+  understands commands and questions and calls the same forecast, parlay,
+  history and newsroom code as the UI.
     Build:    "add Jokic over 26.5 points and Murray 21+ points",
               "add Jokic over 45.5 PRA", "Curry over 4.5 threes",
               "Gobert over 2.5 steals + blocks", "add Jokic double-double",
@@ -288,11 +289,43 @@ COURTSIDE COACH (CHAT)
     Price:    "what are my odds?", "book has it at +450, good price?",
               "Jokic over 26.5 at -115?" (odds: +450, -120, 5.5x, 9/2, evens)
     Research: "what's SGA averaging?", "how often has Wemby gone over 3.5
-              blocks in his last 10 games?", "why are my legs linked?"
+              blocks in his last 10 games?", "why are my legs linked?",
+              "how old is Wemby?", "tell me about Luka"
+    League:   "who's out tonight?", "is LeBron playing tonight?", "who's
+              injured on the Lakers?", "when is Edwards coming back?",
+              "latest news", "Celtics news", "any trades?", "did the Lakers
+              cut anyone?", "who coaches the Warriors?", "how do the Thunder
+              play?", "how good is the Celtics defense?", "which team plays
+              the fastest?", "who gives up the most threes?", "standings",
+              "Lakers record", "OKC roster", "Nuggets vs Suns"
+    Games:    "what games are on tonight?", "games on Saturday", "when do the
+              Lakers play next?", "what's the spread for the Celtics game?",
+              "who's favored tonight?", "did the Knicks win last night?",
+              "scores"
+    The app:  "how does the simulator work?", "how accurate is the model?",
+              "how does calibration work?", "where does the data come from?",
+              "how do I change the theme?", "what can you do?"
+    Betting:  "what does +150 mean?", "convert -135 to decimal", "9/2 in
+              american odds", "how much do I win on $20 at +350?", "what's
+              the vig?", "what's EV?", "what's a push?", "what's PRA?"
     Track:    "track this for $10 at +450 tonight", "grade my bets"
     Memory:   "remember joker means Nikola Jokic", "forget joker"
-  Ambiguous names ("Murray", "Jalen") prompt a choice; the choice is
-  remembered. The chat edits the same slip as the UI (undo restores it).
+  League answers come from the newsroom feeds (cached; stale copies are
+  labeled) with cards that open the matching News, How it works or Settings
+  page. Forecasts in chat also mention the player's injury status and next
+  game. App and betting-term answers come from a built-in knowledge base
+  (backend/knowledge.py). Questions about other sports or unrelated topics
+  are declined, and the coach never gives picks or "locks".
+  Ambiguous names ("Murray", "Tyrese") prompt a choice; the choice is
+  remembered. Team names, nicknames, cities and abbreviations are recognized
+  ("Sixers", "Dubs", "OKC"; MIN/WAS only in capitals). The chat edits the
+  same slip as the UI (undo restores it).
+  Follow-ups stay on the player being discussed: after "how about Curry",
+  "over or under 23.5?", "what about the under?" or "and 26.5?" ask about
+  Curry. A line without a stat means the market whose recent average is
+  clearly nearest (said as "Assuming you mean points"); when two markets fit
+  about equally, the coach asks which. Short answers to its own questions
+  ("points", "22.5", "the under") complete the request it asked about.
   House comparison: break-even = 1 / decimal odds; expected return per unit =
   p * (decimal - 1) - (1 - p); house edge = minus that. Without entered
   odds it assumes -110 on every leg priced as independent, and says so.
@@ -300,11 +333,14 @@ COURTSIDE COACH (CHAT)
 
   Optional language model: set COURTSIDE_LLM_MODEL (plus
   COURTSIDE_LLM_API_KEY and/or COURTSIDE_LLM_BASE_URL) in a git-ignored
-  .env file; see .env.example (OpenAI, Azure OpenAI v1, local Ollama or
-  LM Studio). Commands still run through the built-in parser; the model
-  answers open-ended messages and can only get numbers by calling the
-  app's tools (forecast, price, slip edits, track record). Any failure
-  falls back to the built-in coach. Keys are never logged or returned.
+  .env file; see .env.example (OpenAI, Anthropic, OpenRouter, Azure OpenAI
+  v1, local Ollama or LM Studio). Slip commands still run through the
+  built-in parser; every other message goes to the model, which can only get
+  facts by calling the app's tools (forecasts, slip edits and pricing, track
+  record, news, injuries, roster moves, games and lines, team profiles,
+  coaching staffs, rankings, standings, rosters, player bios, app help, model
+  accuracy and odds math). Any failure falls back to the built-in coach for
+  that message. Keys are never logged or returned.
 
 GETTING SMARTER OVER TIME
   1. My Bets: tracked bets are graded from NBA box scores the day after
@@ -336,7 +372,9 @@ PROJECT STATUS
   persistent line tracking; correlation-aware parlay builder with joint
   same-player pricing; chat coach with slip commands; bet tracker with
   automatic grading; calibration learned from results; newsroom (headlines,
-  injury report, roster moves, coaching staffs, team playing styles).
+  injury report, roster moves, coaching staffs, team playing styles, games
+  with betting lines); chat coach that answers league, game, betting and app
+  questions.
   Primary endpoints:
     GET /api/nba/roster
     GET /api/nba/players?search=<name> (all current matches, no result cap)
@@ -359,6 +397,8 @@ PROJECT STATUS
     GET /api/news/headlines | /injuries | /transactions | /coaches
     GET /api/news/teams?season=current|previous, GET /api/news/teams/{abbr}
     GET /api/news/players/{id} (injury status, teammates listed, headlines)
+    GET /api/news/games?day=YYYY-MM-DD (schedule, scores, game lines and the
+      injuries of the teams playing; default today, US Eastern)
       Each accepts refresh=true to bypass the cache.
     POST /api/assistant/chat {message, conversation_id, slip, focus}
     POST /api/assistant/feedback, GET /api/assistant/status

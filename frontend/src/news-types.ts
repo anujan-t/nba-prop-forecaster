@@ -76,12 +76,62 @@ export type SeasonProfile = TeamProfile & { season: string; team_count: number; 
 export interface TeamDetail {
   team: { id: string; abbreviation: string; name: string; city: string; nickname: string };
   profiles: Partial<Record<'current' | 'previous', SeasonProfile>>;
+  conference?: 'East' | 'West' | null;
   coaches: CoachEntry[];
   coaches_season: string | null;
   injuries: InjuryEntry[];
   headlines: NewsArticle[];
   transactions: Transaction[];
+  next_game?: Game | null; // the next game that isn't final, within the lookahead window
   errors: string[];
+}
+
+// ---------- Games (ESPN scoreboard) ----------
+
+export interface GameSide {
+  team: string; // abbreviation, e.g. "LAL"
+  name: string;
+  record: string | null; // e.g. "12-3"
+  score: number | null;
+  winner: boolean | null;
+}
+
+/** The sportsbook line ESPN lists for a scheduled game, shown for reference only. American odds. */
+export interface GameOdds {
+  provider: string | null; // e.g. "DraftKings"
+  details: string | null; // e.g. "LAL -1.5"
+  home_spread: number | null;
+  away_spread: number | null;
+  total: number | null;
+  favorite: string | null;
+  home_moneyline: number | null;
+  away_moneyline: number | null;
+  home_spread_odds: number | null;
+  away_spread_odds: number | null;
+  over_odds: number | null;
+  under_odds: number | null;
+}
+
+export interface Game {
+  id: string;
+  start: string | null; // ISO UTC
+  tipoff: string | null; // e.g. "8:00 PM ET"
+  state: 'pre' | 'in' | 'post';
+  detail: string | null; // "10/29 - 8:00 PM EDT", "Q3 5:12", "Final", "Final/OT"
+  home: GameSide;
+  away: GameSide;
+  odds: GameOdds | null; // only before tipoff
+  broadcast: string | null; // e.g. "NBA TV, ESPN"
+  note: string | null; // e.g. "NBA Cup - Group Play"
+  date?: string | null; // YYYY-MM-DD (US Eastern), on games looked up for a team
+}
+
+export interface GamesFeed extends Feed {
+  date: string; // YYYY-MM-DD shown
+  today: string; // today in US Eastern time
+  games: Game[];
+  /** Per team playing that day: players listed out, suspended, doubtful, questionable or day-to-day. */
+  injuries: Record<string, InjuryEntry[]>;
 }
 
 export interface PlayerNews {
