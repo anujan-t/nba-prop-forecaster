@@ -24,7 +24,7 @@ export function RichText({ text, className = '' }: { text: string; className?: s
   </div>;
 }
 
-// ---------- Shared bits (also used by the Track record view) ----------
+// ---------- Shared bits (also used by My Bets and the learning panel) ----------
 
 const minus = (text: string) => text.replace(/^-/, '−');
 
@@ -41,7 +41,10 @@ export function BetStatusChip({ status }: { status: BetStatus }) {
 }
 
 export function CalibrationBadge({ calibration }: { calibration: CalibrationStatus }) {
-  return <span className={`calibration-badge ${calibration.active ? 'on' : 'off'}`}><span aria-hidden="true" />{calibration.active ? 'Calibration on' : 'Calibration off'}</span>;
+  const markets = (calibration.stats ?? []).filter(entry => entry.active).length;
+  const on = calibration.active || markets > 0;
+  const text = calibration.stats?.length ? (markets ? `Calibrated · ${markets} of ${calibration.stats.length} markets` : 'Calibration off') : calibration.active ? 'Calibration on' : 'Calibration off';
+  return <span className={`calibration-badge ${on ? 'on' : 'off'}`}><span aria-hidden="true" />{text}</span>;
 }
 
 const verdictNames: Record<HouseComparison['verdict'], string> = { value: 'Better than fair', fair: 'Close to fair', house: 'House edge' };
@@ -109,7 +112,7 @@ function ForecastCardView({ card }: { card: ForecastCard }) {
       <div><dt>Fair odds</dt><dd>O {fair(card.fair.over)} · U {fair(card.fair.under)}</dd></div>
       <div className="wide"><dt>Model</dt><dd>{modelNames[card.resolved_model]}{card.model === 'auto' ? ' (auto)' : ''} · {card.sample_size} games</dd></div>
     </dl>
-    {card.calibrated && <p className="chat-card-note"><BrainCircuit size={13} aria-hidden="true" /><span>“cal.” is after the learning loop’s calibration, which is on because it beat the raw model on recent held-out games.</span></p>}
+    {card.calibrated && <p className="chat-card-note"><BrainCircuit size={13} aria-hidden="true" /><span>“cal.” is after this market’s calibration, which is on because it beat the raw model on recent held-out games.</span></p>}
     {card.house && <HouseBlock house={card.house} />}
   </article>;
 }
@@ -170,9 +173,9 @@ function PlayerCardView({ card }: { card: PlayerCard }) {
 }
 
 function RecordCardView({ record, onOpenRecord }: { record: TrackRecord; onOpenRecord: () => void }) {
-  return <article className="chat-card" aria-label="Track record">
+  return <article className="chat-card" aria-label="My Bets record">
     <header className="chat-card-head">
-      <span className="chat-card-kicker">Track record · {record.bets} {record.bets === 1 ? 'bet' : 'bets'}</span>
+      <span className="chat-card-kicker">My Bets · {record.bets} {record.bets === 1 ? 'bet' : 'bets'}</span>
       <h4><span className="record-score" aria-label={`${record.won} won, ${record.lost} lost`}>{record.won}–{record.lost}</span></h4>
       <span className="chat-card-sub">{recordDetail(record)}</span>
     </header>
@@ -182,11 +185,11 @@ function RecordCardView({ record, onOpenRecord }: { record: TrackRecord; onOpenR
       <div className="wide"><dt>Legs</dt><dd>{legsDetail(record)}</dd></div>
       <div><dt>Brier score</dt><dd>{record.brier === null ? 'N/A' : record.brier.toFixed(3)}</dd></div>
     </dl>
-    <OpenButton onClick={onOpenRecord}>Open Track record</OpenButton>
+    <OpenButton onClick={onOpenRecord}>Open My Bets</OpenButton>
   </article>;
 }
 
-function LearningCardView({ status, onOpenRecord }: { status: LearningStatus; onOpenRecord: () => void }) {
+function LearningCardView({ status, onOpenAccuracy }: { status: LearningStatus; onOpenAccuracy: () => void }) {
   const { calibration, memory } = status;
   return <article className="chat-card" aria-label="Learning loop">
     <header className="chat-card-head chat-card-head-row">
@@ -202,7 +205,7 @@ function LearningCardView({ status, onOpenRecord }: { status: LearningStatus; on
       <div><dt>Ratings</dt><dd>{memory.liked} helpful · {memory.disliked} not</dd></div>
     </dl>
     {status.training && <p className="chat-card-note"><Clock3 size={13} aria-hidden="true" /><span>A retrain is running.</span></p>}
-    <OpenButton onClick={onOpenRecord}>Open Track record</OpenButton>
+    <OpenButton onClick={onOpenAccuracy}>Open Accuracy</OpenButton>
   </article>;
 }
 
@@ -224,17 +227,17 @@ function BetCardView({ bet, onOpenRecord }: { bet: TrackedBet; onOpenRecord: () 
       {bet.status !== 'pending' && <div><dt>Profit</dt><dd>{profitLabel(bet)}</dd></div>}
     </dl>
     {bet.note && <p className="chat-card-text">“{bet.note}”</p>}
-    <OpenButton onClick={onOpenRecord}>Open Track record</OpenButton>
+    <OpenButton onClick={onOpenRecord}>Open My Bets</OpenButton>
   </article>;
 }
 
-export function ChatCardView({ card, onOpenParlay, onOpenRecord }: { card: ChatCard; onOpenParlay: () => void; onOpenRecord: () => void }) {
+export function ChatCardView({ card, onOpenParlay, onOpenRecord, onOpenAccuracy }: { card: ChatCard; onOpenParlay: () => void; onOpenRecord: () => void; onOpenAccuracy: () => void }) {
   switch (card.type) {
     case 'forecast': return <ForecastCardView card={card} />;
     case 'parlay': return <ParlayCardView card={card} onOpenParlay={onOpenParlay} />;
     case 'player': return <PlayerCardView card={card} />;
     case 'track_record': return <RecordCardView record={card.record} onOpenRecord={onOpenRecord} />;
-    case 'learning': return <LearningCardView status={card.status} onOpenRecord={onOpenRecord} />;
+    case 'learning': return <LearningCardView status={card.status} onOpenAccuracy={onOpenAccuracy} />;
     case 'bet': return <BetCardView bet={card.bet} onOpenRecord={onOpenRecord} />;
     default: return null;
   }

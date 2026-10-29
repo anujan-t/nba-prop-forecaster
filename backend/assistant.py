@@ -25,8 +25,9 @@ from .engine import american_probability, forecast, profit_per_unit
 from .llm import LLMClient, LLMError
 from .nba import NBAUnavailableError
 from .parlay import MAX_LEGS, LegNotFound, fair_odds, price_parlay
+from .stats import with_stat
 
-DEFAULTS = {"model": "auto", "lookback": 30, "expected_minutes": None, "rest_days": None, "opponent": None, "use_context": True}
+DEFAULTS = {"model": "auto", "lookback": 60, "expected_minutes": None, "rest_days": None, "opponent": None, "use_context": True}
 STANDARD_LEG_ODDS = -110
 EASTERN = ZoneInfo("America/New_York")
 SUPPORT = ("If betting stops feeling like research, the National Problem Gambling Helpline is 1-800-GAMBLER (1-800-426-2537), "
@@ -447,7 +448,7 @@ class Coach:
         return self.history(player_id, False)
 
     def leg_request(self, player: dict, stat: str, line: float, side: str, focus: dict | None) -> dict:
-        """A leg uses the Forecast lab settings when the user is looking at this player, else the lab defaults."""
+        """A leg uses the Props view settings when the user is looking at this player, else the defaults."""
         settings = dict(DEFAULTS)
         if focus and focus.get("player_id") == player["id"]:
             settings.update({key: focus[key] for key in DEFAULTS if key in focus})
@@ -467,7 +468,7 @@ class Coach:
         for segment in parsed.segments:
             spec = nlu.parse_leg(segment)
             if spec.unsupported:
-                turn.say(f"I can't price {spec.unsupported} yet — COURTSIDE models points, rebounds, assists, steals and blocks.")
+                turn.say(f"I can't price {spec.unsupported} yet — COURTSIDE models points, rebounds, assists, threes, steals, blocks, turnovers, PRA, pts+reb, pts+ast, reb+ast, stocks, FGM/FGA, 3PA, FTM/FTA, offensive and defensive rebounds, fouls, double-doubles and triple-doubles.")
                 continue
             if spec.problem:
                 turn.say(spec.problem)
@@ -485,20 +486,20 @@ class Coach:
             stat = spec.stat or (focus or {}).get("stat") or (carried.get("stat") if carried.get("player") is player else None)
             line = spec.line if spec.line is not None else (focus or {}).get("line") if (focus or {}).get("stat") == stat else None
             if not stat:
-                turn.say(f"Which stat for {player['name']}? Points, rebounds, assists, steals or blocks.")
+                turn.say(f"Which stat for {player['name']}? Points, rebounds, assists, threes, PRA, steals, blocks and more.")
                 turn.suggest(*(f"add {player['name']} over {line:g} {s}" if line is not None else f"what's {player['name']} averaging?"
                                for s in ("points", "rebounds", "assists")))
                 continue
             if line is None:
-                turn.say(f"What line for {player['name']} {stat}? For example **add {player['name']} over 20.5 {stat}**.")
+                turn.say(f"What line for {player['name']} {nlu.phrase(stat)}? For example **add {player['name']} over 20.5 {nlu.phrase(stat)}**.")
                 turn.suggest(f"what's {player['name']} averaging?")
                 continue
             side = spec.side
             if side is None:
-                turn.clarification = {"prompt": f"{player['name']} {stat}: over or under {line:g}?", "options": [
-                    {"label": f"Over {line:g}", "message": f"add {player['name']} over {line:g} {stat}"},
-                    {"label": f"Under {line:g}", "message": f"add {player['name']} under {line:g} {stat}"}]}
-                turn.say(f"Over or under {line:g} {stat} for {player['name']}?")
+                turn.clarification = {"prompt": f"{player['name']} {nlu.phrase(stat)}: over or under {line:g}?", "options": [
+                    {"label": f"Over {line:g}", "message": f"add {player['name']} over {line:g} {nlu.phrase(stat)}"},
+                    {"label": f"Under {line:g}", "message": f"add {player['name']} under {line:g} {nlu.phrase(stat)}"}]}
+                turn.say(f"Over or under {line:g} {nlu.phrase(stat)} for {player['name']}?")
                 return
             carried = {"player": player, "stat": stat}
             self.place_leg(turn, player, stat, line, side)
@@ -508,11 +509,11 @@ class Coach:
             request = self.leg_request(player, stat, line, side, turn.focus)
             result = self.run_forecast(request)
         except (ValueError, KeyError) as exc:
-            turn.say(f"Couldn't add {player['name']} {stat}: {exc}")
+            turn.say(f"Couldn't add {player['name']} {nlu.phrase(stat)}: {exc}")
             return False
         legs = turn.slip["legs"]
         label = {"player": result["player"]["name"], "team": player.get("team") or result["player"]["team"]}
-        description = f"{label['player']} {side.title()} {line:g} {stat}"
+        description = f"{label['player']} {side.title()} {line:g} {nlu.phrase(stat)}"
         probability = result["probabilities"][side]
         existing = next((i for i, leg in enumerate(legs) if leg["request"]["player_id"] == player["id"] and leg["request"]["stat"] == stat), None)
         if existing is not None and legs[existing]["request"] == request:
@@ -575,7 +576,7 @@ class Coach:
         for i in targets:
             leg = legs.pop(i)
             request = leg["request"]
-            turn.act("remove_leg", f"Removed leg {i + 1}: {leg['label']['player']} {request['side'].title()} {request['line']:g} {request['stat']}", i + 1)
+            turn.act("remove_leg", f"Removed leg {i + 1}: {leg['label']['player']} {request['side'].title()} {request['line']:g} {nlu.phrase(request['stat'])}", i + 1)
         turn.say(f"Removed {len(targets)} leg{'s' if len(targets) > 1 else ''}. {len(legs)} left." if legs else "Removed. Your slip is now empty.")
         turn.entities["leg"] = None
 
@@ -618,7 +619,7 @@ class Coach:
             turn.say(f"Couldn't change leg {i + 1}: {exc}")
             return True
         legs[i] = {"request": updated, "label": legs[i]["label"]}
-        description = f"{legs[i]['label']['player']} {new_side.title()} {new_line:g} {request['stat']}"
+        description = f"{legs[i]['label']['player']} {new_side.title()} {new_line:g} {nlu.phrase(request['stat'])}"
         turn.act("update_leg", f"Changed leg {i + 1} to {description}", i + 1)
         turn.say(f"Leg {i + 1} is now **{description}** — {pct(result['probabilities'][new_side])}.")
         turn.entities.update({"player_id": request["player_id"], "stat": request["stat"], "leg": i + 1})
@@ -705,7 +706,7 @@ class Coach:
     def leg_question(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex) -> None:
         spec = nlu.parse_leg(parsed.text)
         if spec.unsupported:
-            turn.say(f"I can't price {spec.unsupported} yet — COURTSIDE models points, rebounds, assists, steals and blocks.")
+            turn.say(f"I can't price {spec.unsupported} yet — COURTSIDE models points, rebounds, assists, threes, steals, blocks, turnovers, PRA, pts+reb, pts+ast, reb+ast, stocks, FGM/FGA, 3PA, FTM/FTA, offensive and defensive rebounds, fouls, double-doubles and triple-doubles.")
             return
         player = self.resolve(turn, parsed.text, index, "ask", spec)
         if player is None:
@@ -725,14 +726,14 @@ class Coach:
             request = self.leg_request(player, stat, line, spec.side or "over", turn.focus)
             result = self.run_forecast(request)
         except (ValueError, KeyError) as exc:
-            turn.say(f"Couldn't forecast {player['name']} {stat}: {exc}")
+            turn.say(f"Couldn't forecast {player['name']} {nlu.phrase(stat)}: {exc}")
             return
         chances = result["probabilities"]
         values = [game["value"] for game in result["history"]]
         window = re.search(r"\b(?:last|past|previous)\s+(\d{1,2})\s+games?\b", nlu.fold(parsed.text))
         if window:
             frame, _ = self.load(request["dataset_id"])
-            rows = frame[frame["player_id"] == player["id"]].sort_values("date").tail(int(window.group(1)))
+            rows = with_stat(frame[frame["player_id"] == player["id"]].sort_values("date"), stat).tail(int(window.group(1)))
             values = rows[stat].astype(int).tolist()
         over_hits = sum(v > line for v in values)
         under_hits = sum(v < line for v in values)
@@ -758,10 +759,10 @@ class Coach:
         })
         name = result["player"]["name"]
         if side:
-            turn.say(f"**{name} {side} {line:g} {stat}: {pct(chances[side])}** by the model "
+            turn.say(f"**{name} {side} {line:g} {nlu.phrase(stat)}: {pct(chances[side])}** by the model "
                      f"({'under' if side == 'over' else 'over'} {pct(chances['under' if side == 'over' else 'over'])}).")
         else:
-            turn.say(f"**{name} {line:g} {stat}:** over {pct(chances['over'])}, under {pct(chances['under'])}.")
+            turn.say(f"**{name} {line:g} {nlu.phrase(stat)}:** over {pct(chances['over'])}, under {pct(chances['under'])}.")
         if chances["push"] > 1e-9:
             turn.say(f"Push (exactly {line:g}): {pct(chances['push'])}.")
         span = f"last {len(values)} games"
@@ -773,7 +774,7 @@ class Coach:
             turn.say(house["note"])
         turn.entities.update({"player_id": player["id"], "stat": stat})
         pick = side or ("over" if chances["over"] >= chances["under"] else "under")
-        turn.suggest(f"add {name} {pick} {line:g} {stat}", f"what's {name} averaging?")
+        turn.suggest(f"add {name} {pick} {line:g} {nlu.phrase(stat)}", f"what's {name} averaging?")
 
     def player_summary(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex, player: dict | None = None) -> None:
         if player is None:
@@ -795,6 +796,9 @@ class Coach:
             turn.say(f"No completed games for {player['name']} in the recent window.")
             return
         averages = {column: round(float(recent[column].mean()), 1) for column in ("points", "rebounds", "assists", "steals", "blocks", "minutes")}
+        threes = pd.to_numeric(recent["three_pointers_made"], errors="coerce") if "three_pointers_made" in recent else None
+        if threes is not None and threes.notna().any():
+            averages["threes"] = round(float(threes.mean()), 1)
         last = [{"date": row.date, "opponent": row.opponent, "minutes": float(row.minutes), "points": int(row.points),
                  "rebounds": int(row.rebounds), "assists": int(row.assists), "steals": int(row.steals), "blocks": int(row.blocks)}
                 for row in recent.iloc[::-1].head(5).itertuples()]
@@ -802,8 +806,10 @@ class Coach:
         team = str(rows.iloc[-1]["team"])
         turn.cards.append({"type": "player", "player": {"id": player["id"], "name": name, "team": team},
                            "games": len(recent), "averages": averages, "last_games": last})
+        pra = averages["points"] + averages["rebounds"] + averages["assists"]
         turn.say(f"**{name}** over his last {len(recent)} games: {averages['points']} pts, {averages['rebounds']} reb, "
-                 f"{averages['assists']} ast, {averages['steals']} stl, {averages['blocks']} blk in {averages['minutes']} min.")
+                 f"{averages['assists']} ast ({pra:.1f} PRA)" + (f", {averages['threes']} threes" if "threes" in averages else "")
+                 + f", {averages['steals']} stl, {averages['blocks']} blk in {averages['minutes']} min.")
         turn.entities["player_id"] = player["id"]
         turn.suggest(f"{name} over {math.floor(averages['points']) + 0.5:g} points?", f"add {name} over {math.floor(averages['points']) - 0.5:g} points")
 
@@ -935,7 +941,7 @@ class Coach:
             return False
 
     def system_prompt(self, turn: Turn) -> str:
-        slip = [f"{i + 1}. {leg['label']['player']} {leg['request']['side']} {leg['request']['line']:g} {leg['request']['stat']}"
+        slip = [f"{i + 1}. {leg['label']['player']} {leg['request']['side']} {leg['request']['line']:g} {nlu.phrase(leg['request']['stat'])}"
                 for i, leg in enumerate(turn.slip["legs"])]
         focus = turn.focus
         return (
@@ -944,10 +950,10 @@ class Coach:
             "conversation; never estimate or invent statistics, odds or injury news. (2) Use the slip tools to change the parlay when "
             "the user asks; confirm what changed. (3) Probabilities are not certainties; this is research, not betting advice. Never "
             "encourage betting, chasing losses or larger stakes; if the user seems distressed, mention 1-800-GAMBLER. (4) Supported stats: "
-            "points, rebounds, assists, steals, blocks. (5) Be concise: at most 120 words, plain text, **bold** and '- ' bullets only. "
+            "points, rebounds, assists, threes, steals, blocks, turnovers, PRA and the other combos, shooting makes and attempts, fouls, double-doubles and triple-doubles. (5) Be concise: at most 120 words, plain text, **bold** and '- ' bullets only. "
             f"Today (US Eastern): {self.today().isoformat()}. Current slip: {('; '.join(slip)) or 'empty'}; book odds: "
             f"{odds_text(turn.slip.get('book_odds')) if turn.slip.get('book_odds') is not None else 'none'}. "
-            f"Forecast lab focus: {focus['player'] + ' ' + focus['stat'] + ' ' + format(focus['line'], 'g') if focus else 'none'}."
+            f"Props view focus: {focus['player'] + ' ' + focus['stat'] + ' ' + format(focus['line'], 'g') if focus else 'none'}."
         )
 
     def tool(self, turn: Turn, index: nlu.PlayerIndex, name: str, args: dict) -> dict:
@@ -958,9 +964,9 @@ class Coach:
             return matches[0]
 
         def stat_of(value) -> str:
-            stat = nlu.STAT_LOOKUP.get(str(value).lower())
+            stat = str(value).lower() if str(value).lower() in nlu.STATS else nlu.STAT_LOOKUP.get(nlu.stat_phrases(nlu.fold(str(value))).strip())
             if not stat:
-                raise ValueError("Stat must be points, rebounds, assists, steals or blocks.")
+                raise ValueError("Stat must be one of: " + ", ".join(nlu.STATS) + ".")
             return stat
 
         def line_of(value) -> float:
@@ -1058,7 +1064,7 @@ def _tool(name: str, description: str, properties: dict | None = None, required:
 
 
 _PLAYER = {"type": "string", "description": "Player name as the user wrote it or the full name"}
-_STAT = {"type": "string", "enum": ["points", "rebounds", "assists", "steals", "blocks"]}
+_STAT = {"type": "string", "enum": list(nlu.STATS)}
 _LINE = {"type": "number", "description": "Whole or half point, e.g. 26.5"}
 _SIDE = {"type": "string", "enum": ["over", "under"]}
 TOOLS = [

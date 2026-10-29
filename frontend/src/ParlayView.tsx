@@ -80,7 +80,7 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
   const tone = (effect: number) => effect > 0.0001 ? 'together' : effect < -0.0001 ? 'against' : 'neutral';
   return <article className="card linkage-card">
     <SectionHeading eyebrow="HOW THE LEGS MOVE" title="Linked legs"><Link2 size={19} className="subtle" aria-hidden="true" /></SectionHeading>
-    <p className="card-intro">Same-player and teammate legs share games, so they tend to rise or fall together. Players on different current teams are treated as independent.</p>
+    <p className="card-intro">Same-player legs on the game simulator are priced together from the same simulated games, so their links are built in. Teammate legs share games, so they are linked through how they moved together. Players on different current teams are treated as independent.</p>
     <div className="table-scroll" tabIndex={0} role="region" aria-label="Leg correlation matrix"><table className="link-matrix">
       <caption className="sr-only">Correlation between legs, oriented by side: positive values mean the two legs tend to win together.</caption>
       <thead><tr><th scope="col"><span className="sr-only">Leg</span></th>{data.legs.slice(1).map(leg => <th scope="col" key={leg.index}>{legNumber(leg.index)}</th>)}</tr></thead>
@@ -93,7 +93,7 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
           const effect = pairEffect(pair, requests);
           const independentPair = pair.basis === 'independent';
           return <td key={column.index}><span className={`link-cell ${independentPair ? 'neutral' : tone(effect)} strength-${effectStrength(effect)}`} title={pair.note}>
-            {independentPair ? '·' : signed(effect, 2)}<span className="sr-only">, {basisNames[pair.basis]}{independentPair ? '' : `, ${pair.games} shared games`}</span>
+            {independentPair ? '·' : signed(effect, 2)}<span className="sr-only">, {basisNames[pair.basis]}{independentPair ? '' : pair.source === 'simulation' ? ', priced jointly from simulated games' : `, ${pair.games} shared games`}</span>
           </span></td>;
         })}
       </tr>)}</tbody>
@@ -104,9 +104,11 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
       const first = legs[pair.a]?.label.player;
       const second = legs[pair.b]?.label.player;
       return <li key={`${pair.a}-${pair.b}`} className={tone(effect)}>
-        <div className="pair-head"><strong>{legList([pair.a, pair.b])}</strong><span className="pill">{basisNames[pair.basis]}</span><span className="pair-strength">{effectStrength(effect) === 'none' ? 'negligible' : effectStrength(effect)} · {effect >= 0 ? 'together' : 'against'}</span></div>
+        <div className="pair-head"><strong>{legList([pair.a, pair.b])}</strong><span className="pill">{basisNames[pair.basis]}</span>{pair.source === 'simulation' && <span className="pill accent-pill">Simulated together</span>}<span className="pair-strength">{effectStrength(effect) === 'none' ? 'negligible' : effectStrength(effect)} · {effect >= 0 ? 'together' : 'against'}</span></div>
         <p>{pair.note}</p>
-        <span className="pair-stats">{pair.games} shared games · rank correlation {pair.rank_correlation === null ? 'N/A' : signed(pair.rank_correlation, 2)} · model uses {signed(pair.correlation, 2)}{Math.abs(effect - pair.correlation) > 0.0001 ? ` (${signed(effect, 2)} for these sides)` : ''}</span>
+        <span className="pair-stats">{pair.source === 'simulation' && pair.simulations
+          ? <>joint from {pair.simulations.toLocaleString()} simulated games · implied correlation {signed(pair.correlation, 2)}{pair.rank_correlation !== null ? ` · ${pair.games} recent games ranked ${signed(pair.rank_correlation, 2)}` : ''}</>
+          : <>{pair.games} shared games · rank correlation {pair.rank_correlation === null ? 'N/A' : signed(pair.rank_correlation, 2)} · model uses {signed(pair.correlation, 2)}{Math.abs(effect - pair.correlation) > 0.0001 ? ` (${signed(effect, 2)} for these sides)` : ''}</>}</span>
         {first && second && <span className="sr-only">{first === second ? `Both legs are ${first}.` : `${first} and ${second}.`}</span>}
       </li>;
     })}</ul>}
@@ -147,11 +149,11 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
       <SwishHoop className="is-static" />
       <h3>Your slip is empty</h3>
       <ol className="parlay-steps">
-        <li><span>1</span>Run a forecast for any player in the Forecast lab.</li>
+        <li><span>1</span>Run a forecast for any player in Players › Props.</li>
         <li><span>2</span>Add its Over or Under as a leg. Up to {MAX_LEGS} legs, one per player and stat.</li>
         <li><span>3</span>Come back here for the chance that every leg hits, with links between same-player and teammate legs.</li>
       </ol>
-      <button type="button" className="primary-button" onClick={onForecast}>Go to the Forecast lab <ArrowRight size={16} aria-hidden="true" /></button>
+      <button type="button" className="primary-button" onClick={onForecast}>Go to Players <ArrowRight size={16} aria-hidden="true" /></button>
     </div> : <>
       <p className="sr-only" aria-live="polite">{fresh && data ? `All ${legs.length} legs hit: ${chance(data.probability)} model probability${data.fair_odds ? `, fair odds ${americanLabel(data.fair_odds.american)}` : ''}.` : ''}</p>
       {error && error.general.length > 0 && <ErrorNotice message={error.general.join(' ')} onRetry={parlay.retry} />}
@@ -165,7 +167,7 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
         <div className="track-card-copy">
           <span className="eyebrow">KEEP SCORE</span>
           <h2 id="track-card-title">Grade it when the games end</h2>
-          <p>Tracking saves these legs and the model’s probability now. Once the games are final, grade it on Track record. Graded results feed the learning loop.</p>
+          <p>Tracking saves these legs and the model’s probability now. Once the games are final, grade it in My Bets. Graded results feed the learning loop.</p>
         </div>
         <TrackBetForm parlay={parlay} onTracked={onTracked} context="view" />
       </section>
@@ -183,7 +185,7 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
         {data.legs.length > 1 && <Linkage data={data} requests={result.request.legs} legs={legs} />}
         {data.history.length > 0 && <History data={data} />}
         <article className="card method-card"><SectionHeading eyebrow="HOW IT’S CALCULATED" title="The method" /><p>{data.method}</p>
-          <p className="quiet-note"><Info size={14} aria-hidden="true" /><span>Each leg uses exactly the same model as the Forecast lab. A whole-number line can push; a push does not count as a win here.</span></p></article>
+          <p className="quiet-note"><Info size={14} aria-hidden="true" /><span>Each leg uses exactly the same model as Players › Props. A whole-number line can push; a push does not count as a win here.</span></p></article>
         {data.warnings.length > 0 && <div className="notice warning-notice" role="status"><TriangleAlert size={18} aria-hidden="true" /><div><strong>Keep the limitations in view</strong>{data.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       </div>}
     </>}

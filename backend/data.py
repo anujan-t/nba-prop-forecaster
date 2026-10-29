@@ -191,7 +191,11 @@ def player_list(frame: pd.DataFrame) -> list[dict]:
         {
             "id": str(player_id), "name": str(group.iloc[-1]["player_name"]),
             "team": str(group.iloc[-1]["team"]), "games": len(group),
-            "averages": {col: round(float(group[col].mean()), 2) for col in (*STATS, "minutes")},
+            "averages": {
+                **{col: round(float(group[col].mean()), 2) for col in (*STATS, "minutes")},
+                **{col: round(float(pd.to_numeric(group[col], errors="coerce").mean()), 2) for col in BOX_COUNTS
+                   if col in group and col != "plus_minus" and pd.to_numeric(group[col], errors="coerce").notna().any()},
+            },
         }
         for player_id, group in frame.groupby("player_id", sort=False)
     ]

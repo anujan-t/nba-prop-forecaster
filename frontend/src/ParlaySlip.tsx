@@ -94,7 +94,7 @@ export function SlipDrawer({ parlay, open, onClose, onViewParlay, onTracked, toa
             errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onRemove={removeLeg} />)}
         </ol> : <div className="slip-empty">
           <Ball className="slip-empty-ball" />
-          <p><strong>Your slip is empty.</strong> Run a forecast in the Forecast lab, then add its Over or Under as a leg.</p>
+          <p><strong>Your slip is empty.</strong> Run a forecast in Players › Props, then add its Over or Under as a leg.</p>
         </div>}
       </div>
       <footer className="slip-footer">

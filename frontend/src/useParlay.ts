@@ -36,7 +36,7 @@ export function computedLeg(result: ParlayComputation | null, leg: SlipLeg, inde
   return { leg: computed, fresh: sameLeg(requested, leg.request) };
 }
 
-export function useParlay(): ParlayState {
+export function useParlay(simulations: number): ParlayState {
   const [initial] = useState(loadSlip);
   const [legs, setLegs] = useState<SlipLeg[]>(initial.legs);
   const [bookOdds, setBookOdds] = useState(initial.bookOdds);
@@ -47,8 +47,8 @@ export function useParlay(): ParlayState {
 
   const odds = parseBookOdds(bookOdds);
   const request = useMemo<ParlayRequest | null>(
-    () => legs.length ? { legs: legs.map(leg => leg.request), book_odds: odds.value } : null,
-    [legs, odds.value],
+    () => legs.length ? { legs: legs.map(leg => leg.request), book_odds: odds.value, simulations } : null,
+    [legs, odds.value, simulations],
   );
   const key = request ? JSON.stringify(request) : '';
 

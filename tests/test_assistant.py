@@ -35,7 +35,8 @@ def league(games: int = 40) -> dict[str, pd.DataFrame]:
             pace = rng.normal()
             values = [max(0, int(round(m + (0.25 * m + 1) * (0.6 * pace + 0.8 * rng.normal())))) for m in means]
             rows.append(dict(date=day.isoformat(), player_id=player["id"], player_name=player["name"], team=player["team"],
-                             opponent="BOS", minutes=34.0, home=bool(game % 2), **dict(zip(nlu.STATS, values))))
+                             opponent="BOS", minutes=34.0, home=bool(game % 2),
+                             **dict(zip(("points", "rebounds", "assists", "steals", "blocks"), values))))
         frames[player["id"]] = validate_frame(pd.DataFrame(rows))
     return frames
 
@@ -177,15 +178,22 @@ class SlipCommandTests(CoachTestCase):
 
     def test_slip_limit_and_unsupported_stats(self):
         for player in ("jokic", "jamal murray"):
-            for stat, line in zip(nlu.STATS, (20.5, 5.5, 4.5, 0.5, 0.5)):
+            for stat, line in zip(("points", "rebounds", "assists", "steals", "blocks"), (20.5, 5.5, 4.5, 0.5, 0.5)):
                 self.say(f"add {player} over {line} {stat}")
         self.assertEqual(len(self.slip["legs"]), 10)
         full = self.say("add sga over 30.5 points")
         self.assertEqual(len(self.slip["legs"]), 10)
         self.assertIn("maximum", full["reply"])
-        unsupported = self.say("add steph 4+ threes")
-        self.assertIn("three-pointers", unsupported["reply"])
+        unsupported = self.say("add steph over 30.5 minutes")
+        self.assertIn("can't price minutes", unsupported["reply"])
         self.assertIsNone(unsupported["slip"])
+        self.say("clear my slip")
+        no_splits = self.say("add steph 4+ threes")
+        self.assertIn("box-score details", no_splits["reply"])
+        self.assertIsNone(no_splits["slip"])
+        combo = self.say("add jokic over 45.5 PRA")
+        self.assertEqual(self.legs(), [("Nikola Jokić", "pts_reb_ast", "over", 45.5)])
+        self.assertIn("PRA", combo["reply"])
 
     def test_focus_is_used_for_this_prop(self):
         focus = {"dataset_id": "ds-203999", "player_id": "203999", "player": "Nikola Jokić", "team": "DEN", "stat": "rebounds",

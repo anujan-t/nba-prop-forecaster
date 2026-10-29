@@ -1,14 +1,17 @@
 import { Check, Minus, Plus, Replace, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { decimal, modelNames, pct, statNames } from './api';
+import { decimal, isMilestone, modelNames, pct, statNames } from './api';
+import { InjuryBadge } from './NewsPage';
 import { MAX_LEGS, americanLabel, chance, decimalOdds, legDescription, legFromForecast, legKey, legNumber, normalizeLine, sameLeg, sideNames, statLabel } from './parlay';
 import type { SlipLeg } from './parlay';
 import type { ParlayLeg, Side } from './parlay-types';
 import type { AppliedForecast } from './types';
 
-export function SideToggle({ side, onChange, label }: { side: Side; onChange: (side: Side) => void; label: string }) {
+const yesNoNames: Record<Side, string> = { over: 'Yes', under: 'No' };
+
+export function SideToggle({ side, onChange, label, yesNo = false }: { side: Side; onChange: (side: Side) => void; label: string; yesNo?: boolean }) {
   return <div className="side-toggle" role="group" aria-label={label}>
-    {(['over', 'under'] as const).map(option => <button key={option} type="button" className={side === option ? 'selected' : ''} aria-pressed={side === option} onClick={() => { if (option !== side) onChange(option); }}>{sideNames[option]}</button>)}
+    {(['over', 'under'] as const).map(option => <button key={option} type="button" className={side === option ? 'selected' : ''} aria-pressed={side === option} onClick={() => { if (option !== side) onChange(option); }}>{(yesNo ? yesNoNames : sideNames)[option]}</button>)}
   </div>;
 }
 
@@ -71,6 +74,7 @@ export function LegEditor({ leg, index, computed, computing, errors, detailed = 
   const fresh = computed?.fresh ?? false;
   const probability = shown?.probability ?? null;
   const games = shown?.hit_rate.games ?? 0;
+  const yesNo = isMilestone(leg.request.stat);
   return <li className={`leg-card${detailed ? ' leg-card-detailed' : ''}${errors?.length ? ' has-error' : ''} side-${leg.request.side}`}>
     <span className="leg-number" aria-hidden="true">{legNumber(index)}</span>
     <div className="leg-body">
@@ -78,12 +82,14 @@ export function LegEditor({ leg, index, computed, computing, errors, detailed = 
         <div className="leg-who">
           <h3><span className="sr-only">Leg {index + 1}: </span>{leg.label.player}</h3>
           <span>{[leg.label.team, statNames[leg.request.stat]].filter(Boolean).join(' · ')}</span>
+          {shown?.injury && <InjuryBadge entry={shown.injury} />}
         </div>
         <button type="button" className="icon-button leg-remove" aria-label={`Remove leg ${index + 1}: ${description}`} title="Remove leg" onClick={() => onRemove(index)}><X size={16} aria-hidden="true" /></button>
       </div>
       <div className="leg-controls">
-        <SideToggle side={leg.request.side} onChange={side => onSide(index, side)} label={`Side for leg ${index + 1}`} />
-        <LineStepper value={leg.request.line} onChange={line => onLine(index, line)} label={`Line for leg ${index + 1}, ${statLabel(leg.request.stat)}`} />
+        <SideToggle side={leg.request.side} onChange={side => onSide(index, side)} label={`Side for leg ${index + 1}`} yesNo={yesNo} />
+        {yesNo ? <span className="leg-yes-no">{leg.request.side === 'over' ? `Gets a ${statLabel(leg.request.stat)}` : `No ${statLabel(leg.request.stat)}`}</span>
+          : <LineStepper value={leg.request.line} onChange={line => onLine(index, line)} label={`Line for leg ${index + 1}, ${statLabel(leg.request.stat)}`} />}
       </div>
       <div className={`leg-probability${fresh ? '' : ' is-stale'}`}>
         <div className="leg-bar" aria-hidden="true"><span style={{ width: probability === null ? '0%' : pct(Math.min(1, Math.max(0, probability))) }} /></div>
@@ -98,7 +104,7 @@ export function LegEditor({ leg, index, computed, computing, errors, detailed = 
         <div><dt>Fair odds</dt><dd>{shown.fair_odds ? `${americanLabel(shown.fair_odds.american)} · ${decimalOdds(shown.fair_odds.decimal)}` : 'N/A'}</dd></div>
         <div><dt>Push</dt><dd>{pct(shown.push)}</dd></div>
         <div><dt>Model mean</dt><dd>{decimal(shown.mean)}</dd></div>
-        <div className="leg-fact-wide"><dt>Model</dt><dd>{modelNames[shown.resolved_model]}{shown.model === 'auto' ? ' (auto)' : ''} · {shown.sample_size} games</dd></div>
+        <div className="leg-fact-wide"><dt>Model</dt><dd>{modelNames[shown.resolved_model]}{shown.model === 'auto' ? ' (auto)' : ''} · {shown.sample_size} games{shown.simulations ? ` · ${shown.simulations.toLocaleString()} sims` : ''}</dd></div>
       </dl>}
       {errors?.map((message, position) => <p key={position} className="leg-error" role="alert">{message}</p>)}
     </div>
@@ -114,7 +120,7 @@ interface ActionProps {
   onOpenSlip: () => void;
 }
 
-/** "Add Over / Under" buttons under a Forecast lab result. */
+/** "Add Over / Under" buttons under a Players › Props result. */
 export function ForecastParlayActions({ applied, legs, full, dirty, onAdd, onOpenSlip }: ActionProps) {
   const forecast = applied.data;
   const key = legKey(applied.request);
@@ -123,7 +129,7 @@ export function ForecastParlayActions({ applied, legs, full, dirty, onAdd, onOpe
   const button = (side: Side) => {
     const candidate = legFromForecast(applied, side);
     const probability = side === 'over' ? forecast.probabilities.over : forecast.probabilities.under;
-    const name = `${sideNames[side]} ${forecast.line}`;
+    const name = isMilestone(forecast.stat) ? `${side === 'over' ? 'Yes' : 'No'}: ${statLabel(forecast.stat)}` : `${sideNames[side]} ${forecast.line}`;
     if (existing && sameLeg(existing.request, candidate)) {
       return <button type="button" className={`leg-action ${side}-action in-slip`} aria-disabled="true"><Check size={16} aria-hidden="true" /><span>{name} is leg {index + 1}</span><span className="leg-action-prob">{pct(probability)}</span></button>;
     }

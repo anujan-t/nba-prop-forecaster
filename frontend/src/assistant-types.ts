@@ -96,7 +96,7 @@ export interface PlayerCard {
   type: 'player';
   player: { id: string; name: string; team: string };
   games: number; // games in the window
-  averages: Record<Stat | 'minutes', number>; // over the last `games` games
+  averages: Record<'points' | 'rebounds' | 'assists' | 'steals' | 'blocks' | 'minutes', number> & { threes?: number }; // over the last `games` games
   last_games: { date: string; opponent: string; minutes: number; points: number; rebounds: number; assists: number; steals: number; blocks: number }[]; // most recent first, up to 5
 }
 
@@ -208,6 +208,27 @@ export interface CalibrationStatus {
   holdout: null | { samples: number; raw_log_loss: number; calibrated_log_loss: number; raw_brier: number; calibrated_brier: number };
   curve: { predicted: number; observed: number; calibrated: number; count: number }[]; // up to 10 bins
   message: string; // plain-English summary of what was learned or why it is off
+  stats?: StatCalibration[]; // one entry per market with graded predictions (absent before the first per-market training)
+}
+
+/** One market's calibration: its own correction, the shared one, or the raw model, whichever did best on recent games. */
+export interface StatCalibration {
+  stat: Stat;
+  label: string;
+  samples: number;
+  ledger_samples: number;
+  choice: 'own' | 'shared' | 'none';
+  active: boolean;
+  intercept: number | null;
+  slope: number | null;
+  holdout: null | {
+    samples: number;
+    raw_log_loss: number; raw_brier: number;
+    shared_log_loss: number; shared_brier: number;
+    own_log_loss: number; own_brier: number;
+  };
+  curve: { predicted: number; observed: number; calibrated: number; count: number }[];
+  message: string;
 }
 
 export interface LearningStatus {

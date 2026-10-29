@@ -7,10 +7,15 @@ import numpy as np
 import pandas as pd
 from scipy.stats import nbinom, norm, poisson
 
-from .data import STATS
+from . import simulation
+from .stats import STAT_DEFS, definition, label, validate_line as validate_market_line, with_stat
 
-MODELS = ("empirical", "normal", "poisson", "negative_binomial", "auto")
+ANALYTIC = ("empirical", "normal", "poisson", "negative_binomial")
+MODELS = (*ANALYTIC, "simulation", "auto")
 MIN_TRAIN = 15
+# Markets where Auto uses the game simulator: those where it scored better than the analytic rule in walk-forward tests
+# on 8,417 real 2024-25 and 2025-26 player-games (see RUNNING.txt, "Model selection").
+AUTO_SIMULATION = frozenset(STAT_DEFS)
 
 
 def american_probability(odds: int) -> float:
@@ -49,11 +54,24 @@ class CountDistribution:
     std: float
     frozen: object | None = None
     normal_floor: float = 0.0
+    cumulative: np.ndarray | None = None  # simulated distributions: P(X <= k) for k = 0, 1, ...
+    runs: int = 0
+
+    @classmethod
+    def from_draws(cls, draws: np.ndarray, model: str = "simulation") -> "CountDistribution":
+        draws = np.asarray(draws, dtype=np.int64)
+        counts = np.bincount(np.maximum(draws, 0))
+        cumulative = np.cumsum(counts) / len(draws)
+        cumulative[-1] = 1.0
+        return cls(model, draws, float(draws.mean()), float(draws.std(ddof=1)) if len(draws) > 1 else 0.0,
+                   cumulative=cumulative, runs=len(draws))
 
     def cdf(self, k: float) -> float:
         k = math.floor(k)
         if k < 0:
             return 0.0
+        if self.cumulative is not None:
+            return 1.0 if k >= len(self.cumulative) else float(self.cumulative[k])
         if self.model == "empirical":
             return float(np.mean(self.values <= k))
         if self.model == "normal":
@@ -67,10 +85,13 @@ class CountDistribution:
             raise ValueError("The prop line must be a non-negative integer or half-integer, at most 200.")
         over = max(0.0, 1 - self.cdf(math.floor(line)))
         under = self.cdf(math.ceil(line) - 1)
-        push = max(0.0, 1 - over - under)
+        # Only a whole-number line can land exactly on the line.
+        push = max(0.0, 1 - over - under) if float(line).is_integer() else 0.0
         return over, under, push
 
     def quantile(self, probability: float) -> int:
+        if self.cumulative is not None:
+            return int(np.searchsorted(self.cumulative, probability - 1e-12))
         if self.model == "empirical":
             return int(np.quantile(self.values, probability, method="inverted_cdf"))
         if self.model == "normal":
@@ -131,21 +152,85 @@ def context_adjustment(
     return factor, details, notes
 
 
-def fit_distribution(history: pd.DataFrame, stat: str, model: str, factor: float = 1.0) -> CountDistribution:
-    if stat not in STATS or model not in MODELS:
+def simulation_supported(history: pd.DataFrame, stat: str) -> bool:
+    """Whether the game simulator can produce this market from these games (needs minutes and the box-score parts)."""
+    spec = definition(stat)
+    if not spec.simulated:
+        return False
+    if simulation.full_mode(history):
+        return True
+    return all(column in simulation.BASIC for column in spec.columns)
+
+
+def resolve_model(history: pd.DataFrame, stat: str, model: str) -> str:
+    """The model that will actually run: Auto's choice, or the requested model when it suits the market."""
+    spec = definition(stat)
+    if model not in MODELS:
+        raise ValueError("Unknown model.")
+    if model == "auto":
+        if stat in AUTO_SIMULATION and simulation_supported(history, stat):
+            return "simulation"
+        if spec.milestone:
+            return "empirical"
+        if spec.family == "small":
+            values = history[stat].to_numpy(dtype=float)
+            return "negative_binomial" if float(values.var(ddof=1)) > 1.5 * float(values.mean()) else "poisson"
+        return "normal"
+    if model == "simulation" and not simulation_supported(history, stat):
+        raise ValueError(f"The game simulator needs shooting, rebound, turnover and foul splits for {spec.label.lower()}; "
+                         "choose another model.")
+    if spec.milestone and model not in ("empirical", "simulation"):
+        raise ValueError(f"{spec.label} is a yes/no market; use the game simulator or the empirical model.")
+    return model
+
+
+def models_for(history: pd.DataFrame, stat: str) -> list[str]:
+    """Every concrete model that can describe this market for these games (the model bench)."""
+    spec = definition(stat)
+    names = ["empirical"] if spec.milestone else list(ANALYTIC)
+    if simulation_supported(history, stat):
+        names.append("simulation")
+    return names
+
+
+def simulate_market(history: pd.DataFrame, stat: str, context: dict | None, simulations: int,
+                    cached: bool = True, seed: int = simulation.SEED) -> tuple[CountDistribution, simulation.GameModel]:
+    context = context or {}
+    model = simulation.fit_game_model(
+        history, context.get("expected_minutes"), context.get("rest_days"), context.get("opponent"),
+        context.get("use_context", False),
+    )
+    simulated = simulation.CACHE.get(model, simulations, seed) if cached else simulation.simulate(model, simulations, seed)
+    return CountDistribution.from_draws(simulated.market(stat)), model
+
+
+def fit_distribution(history: pd.DataFrame, stat: str, model: str, factor: float = 1.0, context: dict | None = None,
+                     simulations: int | None = None) -> CountDistribution:
+    """Fit one model to the market's trailing values (history must hold the market as a column).
+
+    Analytic models scale by `factor`. The simulator uses `context` (minutes scenario, rest, opponent); without a
+    context, `factor` rescales its simulated minutes.
+    """
+    if stat not in STAT_DEFS or model not in MODELS:
         raise ValueError("Unknown stat or model.")
     if len(history) < 2:
         raise ValueError("At least two previous games are required.")
+    model = resolve_model(history, stat, model)
+    if model == "simulation":
+        if context is None and factor != 1.0:
+            context = {"expected_minutes": float(history["minutes"].mean()) * factor, "use_context": True}
+        fitted, _ = simulate_market(history, stat, context, simulations or simulation.EVALUATION_SIMULATIONS)
+        return fitted
     values = history[stat].to_numpy(dtype=float)
     observed_mean = float(values.mean())
     observed_var = float(values.var(ddof=1))
     mean = observed_mean * factor
     # A count-rate scenario scales the Poisson noise linearly and excess variance quadratically.
     variance = max(mean, mean + max(0.0, observed_var - observed_mean) * factor * factor)
-    if model == "auto":
-        model = ("negative_binomial" if observed_var > 1.5 * observed_mean else "poisson") if stat in ("steals", "blocks") else "normal"
     if model == "empirical":
         adjusted = np.maximum(0, np.floor(values * factor + 0.5))
+        if definition(stat).milestone:
+            adjusted = np.minimum(adjusted, 1)
         return CountDistribution(model, adjusted, float(adjusted.mean()), float(adjusted.std(ddof=1)))
     if model == "normal":
         std = max(0.5, math.sqrt(observed_var) * factor)
@@ -163,23 +248,70 @@ def fit_distribution(history: pd.DataFrame, stat: str, model: str, factor: float
     return CountDistribution("poisson", values, mean, math.sqrt(mean), poisson(mean))
 
 
-def forecast(frame: pd.DataFrame, dataset: dict, request: dict) -> dict:
-    stat = request["stat"]
-    player_games = frame[frame["player_id"] == request["player_id"]].sort_values("date")
+def market_history(frame: pd.DataFrame, player_id: str, stat: str) -> pd.DataFrame:
+    """The player's games (oldest first) where the market is known, with the market as a column."""
+    player_games = frame[frame["player_id"] == player_id].sort_values("date")
     if player_games.empty:
         raise ValueError("Player not found in the selected dataset.")
     if len(player_games) < 10:
         raise ValueError("At least 10 completed games are required for a forecast.")
-    history = player_games.tail(request["lookback"])
-    factor, details, notes = context_adjustment(
-        history, stat, request.get("expected_minutes"), request.get("rest_days"),
-        request.get("opponent"), request["use_context"],
-    )
-    fitted = fit_distribution(history, stat, request["model"], factor)
+    games = with_stat(player_games, stat)
+    if len(games) < 10:
+        raise ValueError(f"{label(stat)} needs box-score details that only {len(games)} of this player's games include; "
+                         "at least 10 are required. Load the player's NBA history to get full box scores.")
+    return games
+
+
+def market_simulation(frame: pd.DataFrame, request: dict) -> simulation.Simulation | None:
+    """The cached joint simulation behind a forecast request, or None when its model is not the simulator."""
+    stat = request["stat"]
+    history = market_history(frame, request["player_id"], stat).tail(request["lookback"])
+    if resolve_model(history, stat, request["model"]) != "simulation":
+        return None
+    model = simulation.fit_game_model(history, request.get("expected_minutes"), request.get("rest_days"),
+                                      request.get("opponent"), request["use_context"])
+    return simulation.CACHE.get(model, int(request.get("simulations") or simulation.DEFAULT_SIMULATIONS))
+
+
+def forecast(frame: pd.DataFrame, dataset: dict, request: dict) -> dict:
+    stat = request["stat"]
+    spec = definition(stat)
+    runs = int(request.get("simulations") or simulation.DEFAULT_SIMULATIONS)
+    games = market_history(frame, request["player_id"], stat)
+    validate_market_line(stat, request["line"])
+    history = games.tail(request["lookback"])
+    resolved = resolve_model(history, stat, request["model"])
+    context = {key: request.get(key) for key in ("expected_minutes", "rest_days", "opponent")}
+    context["use_context"] = request["use_context"]
+    if spec.milestone:
+        factor, details = 1.0, {"projected_minutes": float(history["minutes"].mean()), "rest_factor": 1.0, "opponent_factor": 1.0}
+        notes = ["Yes/no markets are not rescaled by the analytic context rule; the game simulator applies minutes, rest "
+                 "and opponent context to the box-score parts instead."]
+    else:
+        factor, details, notes = context_adjustment(
+            history, stat, request.get("expected_minutes"), request.get("rest_days"), request.get("opponent"), request["use_context"],
+        )
+    simulated, game_model = None, None
+    if "simulation" in models_for(history, stat) and (resolved == "simulation" or request.get("compare", True)):
+        simulated, game_model = simulate_market(history, stat, context, runs)
+    if resolved == "simulation":
+        fitted = simulated
+        notes = list(game_model.notes)
+        details = {
+            "projected_minutes": float(simulation.CACHE.get(game_model, runs).minutes.mean()),
+            "rest_factor": game_model.factor(stat, "rest"), "opponent_factor": game_model.factor(stat, "opponent"),
+        }
+        factor = game_model.minutes_scale * game_model.factor(stat, "combined")
+        for key, name in (("rest_factor", "Rest"), ("opponent_factor", "Opponent")):
+            if abs(details[key] - 1) > 5e-4:
+                notes.append(f"{name} rate adjustment {details[key]:.3f}x on the box-score parts behind {spec.label.lower()}, "
+                             f"each shrunk with a {simulation.CONTEXT_PRIOR_GAMES}-game prior weight.")
+    else:
+        fitted = fit_distribution(history, stat, resolved, factor)
     over, under, push = fitted.probabilities(request["line"])
     comparisons = []
-    for model in MODELS[:-1]:
-        candidate = fit_distribution(history, stat, model, factor)
+    for model in models_for(history, stat) if request.get("compare", True) else [resolved]:
+        candidate = simulated if model == "simulation" else fitted if model == resolved else fit_distribution(history, stat, model, factor)
         p_over, p_under, p_push = candidate.probabilities(request["line"])
         comparisons.append({"model": model, "over": p_over, "under": p_under, "push": p_push, "mean": candidate.mean})
     warnings = []
@@ -192,21 +324,36 @@ def forecast(frame: pd.DataFrame, dataset: dict, request: dict) -> dict:
     variance = float(history[stat].var(ddof=1))
     if fitted.model == "poisson" and variance > 1.5 * max(float(history[stat].mean()), 0.01):
         warnings.append("Observed variance exceeds the Poisson mean assumption. Compare the negative-binomial and empirical models.")
-    if fitted.model == "normal" and stat in ("steals", "blocks"):
+    if fitted.model == "normal" and spec.family == "small":
         warnings.append("Normal approximation is weak for low counts. Compare a discrete count model.")
     if fitted.model == "empirical":
         warnings.append("Empirical probabilities cannot assign mass beyond observed counts; scenario adjustment rounds scaled counts.")
     if request["model"] == "negative_binomial" and fitted.model == "poisson":
         warnings.append("No excess variance was estimated; the negative-binomial model uses its Poisson limit.")
     if request["model"] == "auto":
-        notes.append("Auto is a transparent rule, not tuned model selection: normal for points/rebounds/assists; Poisson or overdispersed negative-binomial for steals/blocks.")
-    warnings.append("No injury, lineup, usage-change or live odds feed. Context adjustments are exploratory, not causal effects.")
-    last = player_games.iloc[-1]
+        notes.append("Auto uses the game simulator for every market it can build from these box scores (it scored better than "
+                     "the analytic rule in walk-forward tests on real games); otherwise normal for large counts and Poisson or "
+                     "negative binomial for small ones." if resolved == "simulation" else
+                     "Auto is a transparent rule: the game simulator when the box scores allow it; otherwise normal for large "
+                     "counts and Poisson or overdispersed negative binomial for small ones.")
+    warnings.append("The model does not read injury reports, lineups or live odds; check News for injuries. Context "
+                    "adjustments are exploratory, not causal effects.")
+    last = games.iloc[-1]
     market = market_comparison(over, under, push, request["odds_over"], request["odds_under"])
     if market["overround"] < 0:
         warnings.append("Entered two-sided odds imply a negative overround; verify they refer to the same book and event.")
     if market["model_over_conditional"] is None:
         warnings.append("This model predicts only a push at this line; a conditional over probability or edge is undefined.")
+    simulation_info = None
+    if resolved == "simulation":
+        simulated_minutes = simulation.CACHE.get(game_model, runs).minutes
+        simulation_info = {
+            "runs": fitted.runs, "seed": simulation.SEED,
+            "standard_error": simulation.standard_error(over, fitted.runs),
+            "box_score": "full" if game_model.full else "basic", "half_life": simulation.HALF_LIFE,
+            "minutes": {"mean": float(simulated_minutes.mean()), "low": float(np.quantile(simulated_minutes, 0.1)),
+                        "high": float(np.quantile(simulated_minutes, 0.9))},
+        }
     return {
         "dataset": dataset, "player": {"id": request["player_id"], "name": str(last["player_name"]), "team": str(last["team"])},
         "stat": stat, "line": request["line"], "model": request["model"], "resolved_model": fitted.model,
@@ -223,7 +370,8 @@ def forecast(frame: pd.DataFrame, dataset: dict, request: dict) -> dict:
              "opponent": row.opponent, "rest_days": int(row.rest_days), "home": None if pd.isna(row.home) else bool(row.home)}
             for row in history.itertuples()
         ],
-        "comparisons": comparisons, "warnings": warnings, "context_notes": notes,
+        "comparisons": comparisons, "warnings": warnings, "context_notes": notes, "simulation": simulation_info,
+        "calibrated": None,
     }
 
 
@@ -237,15 +385,19 @@ def score_predictions(predictions: list[dict]) -> tuple[float, float]:
 
 
 def backtest(frame: pd.DataFrame, request: dict) -> dict:
+    stat = request["stat"]
+    spec = definition(stat)
     if request.get("player_id"):
         frame = frame[frame["player_id"] == request["player_id"]]
         if frame.empty:
             raise ValueError("Player not found in the selected dataset.")
-    records = {model: [] for model in MODELS}
+    if request.get("line") is not None:
+        validate_market_line(stat, request["line"])
+    frame = with_stat(frame, stat)
     if int((frame.groupby("player_id").size() - MIN_TRAIN).clip(lower=0).sum()) > 5000:
         raise ValueError("Select a player or a shorter dataset: one backtest is limited to 5,000 evaluation games.")
+    records: dict[str, list] = {}
     pushes = 0
-    stat = request["stat"]
     for player_id, player_games in frame.groupby("player_id"):
         player_games = player_games.sort_values("date").reset_index(drop=True)
         for index in range(MIN_TRAIN, len(player_games)):
@@ -253,31 +405,37 @@ def backtest(frame: pd.DataFrame, request: dict) -> dict:
             target = player_games.iloc[index]
             line = request.get("line")
             if line is None:
-                line = float(math.floor(float(history[stat].median())) + 0.5)
+                line = 0.5 if spec.milestone else float(math.floor(float(history[stat].median())) + 0.5)
             actual = int(target[stat])
             if actual == line:
                 pushes += 1
                 continue
             # Rest and opponent are schedule features. Minutes are estimated strictly from older games.
-            factor, _, _ = context_adjustment(history, stat, None, int(target["rest_days"]), str(target["opponent"]), request["use_context"])
+            rest, opponent = int(target["rest_days"]), str(target["opponent"])
+            if spec.milestone:
+                factor = 1.0
+            else:
+                factor, _, _ = context_adjustment(history, stat, None, rest, opponent, request["use_context"])
             candidates = {}
-            for model in MODELS[:-1]:
-                fitted = fit_distribution(history, stat, model, factor)
+            for model in models_for(history, stat):
+                if model == "simulation":
+                    fitted, _ = simulate_market(history, stat, {"rest_days": rest, "opponent": opponent, "use_context": request["use_context"]},
+                                                simulation.EVALUATION_SIMULATIONS, cached=False, seed=simulation.SEED + index)
+                else:
+                    fitted = fit_distribution(history, stat, model, factor)
                 over, under, _ = fitted.probabilities(line)
                 # A tiny symmetric smoothing prior keeps all-push empirical windows scoreable.
-                conditional = (over + 1e-6) / (over + under + 2e-6)
-                candidates[model] = conditional
-                records[model].append({
+                candidates[model] = (over + 1e-6) / (over + under + 2e-6)
+            candidates["auto"] = candidates[resolve_model(history, stat, "auto")]
+            for model, conditional in candidates.items():
+                records.setdefault(model, []).append({
                     "date": str(target["date"]), "player_id": str(player_id), "line": line,
                     "actual": actual, "probability": conditional, "outcome": int(actual > line),
                 })
-            auto = fit_distribution(history, stat, "auto", factor).model
-            records["auto"].append({
-                "date": str(target["date"]), "player_id": str(player_id), "line": line,
-                "actual": actual, "probability": candidates[auto], "outcome": int(actual > line),
-            })
-    predictions = sorted(records[request["model"]], key=lambda p: (p["date"], p["player_id"]))
+    predictions = sorted(records.get(request["model"], []), key=lambda p: (p["date"], p["player_id"]))
     if not predictions:
+        if records and request["model"] not in records:
+            resolve_model(frame.tail(MIN_TRAIN), stat, request["model"])  # raises why this model cannot describe the market
         raise ValueError("No settled evaluation games. Need at least 16 games per player and a line with non-push outcomes.")
     brier, log_loss = score_predictions(predictions)
     calibration = []
@@ -306,6 +464,7 @@ def backtest(frame: pd.DataFrame, request: dict) -> dict:
             + ("Adaptive half-point lines come from the prior rolling median, not historical sportsbook lines. "
                if request.get("line") is None else "The chosen line is held fixed across history, not historical sportsbook lines. ")
             + "Pushes are excluded and probabilities conditioned on a settled outcome; a 1e-6 symmetric prior handles degenerate predictions. "
+            f"The game simulator scores each held-out game from {simulation.EVALUATION_SIMULATIONS:,} simulated games. "
             "Baseline is a constant 50% forecast (Brier 0.25); log loss clips probabilities at 1e-6. "
             "Comparing these models is exploratory, not an independent holdout after model selection. No profitability claim."
         ),

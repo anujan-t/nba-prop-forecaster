@@ -1,6 +1,6 @@
 import { ArrowUpRight, Check, CircleAlert, Info, RotateCcw, SendHorizontal, Sparkles, Square, SquarePen, Target, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent } from 'react';
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 import { statNames } from './api';
 import type { AssistantStatus, ChatFocus } from './assistant-types';
 import { MAX_MESSAGE_LENGTH, plainText, slipActions, timeLabel } from './chat';
@@ -62,7 +62,7 @@ export function ChatLauncher({ open, busy, unread, onOpen }: { open: boolean; bu
   </button>;
 }
 
-function engineLabel(status: AssistantStatus | null, error: string): { text: string; tone: 'checking' | 'built-in' | 'llm' | 'warning' } {
+export function engineLabel(status: AssistantStatus | null, error: string): { text: string; tone: 'checking' | 'built-in' | 'llm' | 'warning' } {
   if (status) {
     if (status.mode === 'llm') return { text: `LLM · ${status.model ?? 'model'}${status.ready ? '' : ' (offline)'}`, tone: status.ready ? 'llm' : 'warning' };
     return { text: 'Built-in', tone: 'built-in' };
@@ -70,7 +70,13 @@ function engineLabel(status: AssistantStatus | null, error: string): { text: str
   return error ? { text: 'Status unknown', tone: 'warning' } : { text: 'Checking…', tone: 'checking' };
 }
 
-interface TurnProps {
+interface CardLinks {
+  onOpenParlay: () => void;
+  onOpenRecord: () => void;
+  onOpenAccuracy: () => void;
+}
+
+interface TurnProps extends CardLinks {
   message: CoachMessage;
   latest: boolean;
   undoable: boolean;
@@ -78,11 +84,9 @@ interface TurnProps {
   feedbackError: string | null;
   onSend: (text: string) => void;
   onRate: (messageId: string, rating: 1 | -1) => void;
-  onOpenParlay: () => void;
-  onOpenRecord: () => void;
 }
 
-function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onRate, onOpenParlay, onOpenRecord }: TurnProps) {
+function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onRate, onOpenParlay, onOpenRecord, onOpenAccuracy }: TurnProps) {
   const { reply } = message;
   const skipped = message.slip === 'skipped';
   const clarification = reply.clarification;
@@ -98,7 +102,7 @@ function CoachTurn({ message, latest, undoable, busy, feedbackError, onSend, onR
         {undoable && <button type="button" className="chat-chip undo-chip" disabled={busy} onClick={() => onSend('undo')}><Undo2 size={14} aria-hidden="true" />Undo</button>}
       </div>}
       {message.notes.map((note, index) => <p key={index} className="chat-note"><TriangleAlert size={14} aria-hidden="true" /><span>{note}</span></p>)}
-      {reply.cards.map((card, index) => <CardBoundary key={index}><ChatCardView card={card} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} /></CardBoundary>)}
+      {reply.cards.map((card, index) => <CardBoundary key={index}><ChatCardView card={card} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} /></CardBoundary>)}
       {reply.learned.map((text, index) => <p key={index} className="chat-learned"><Sparkles size={13} aria-hidden="true" /><span>{/^learned\b/i.test(text) ? text : `Learned: ${text}`}</span></p>)}
       {clarification && <div className="chat-clarify" role="group" aria-labelledby={`clarify-${message.id}`}>
         <p id={`clarify-${message.id}`}>{clarification.prompt || 'Which one did you mean?'}</p>
@@ -126,10 +130,9 @@ function UserTurn({ message, answered }: { message: UserMessage; answered: boole
   </li>;
 }
 
-interface PanelProps {
+/** What the drawer and the Coach page share: one conversation, one slip, the same links out. */
+export interface ConversationProps extends CardLinks {
   chat: ChatState;
-  open: boolean;
-  onClose: () => void;
   focus: ChatFocus | null;
   slipCount: number;
   slipProbability: number | null;
@@ -137,15 +140,21 @@ interface PanelProps {
   slipHash: string;
   bounce: number;
   onOpenSlip: () => void;
-  onOpenParlay: () => void;
-  onOpenRecord: () => void;
 }
 
-export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbability, slipBusy, slipHash, bounce, onOpenSlip, onOpenParlay, onOpenRecord }: PanelProps) {
-  const { conversation, pending, failure, status, statusError } = chat;
+interface ConversationViewProps extends ConversationProps {
+  variant: 'drawer' | 'page';
+  /** Drawer: whether it is open. The page is active whenever it is shown. */
+  active: boolean;
+  onClose?: () => void;
+}
+
+/** The conversation itself. Rendered either in the drawer or on the Coach page, never both at once. */
+function ChatConversation({ variant, active, onClose, chat, focus, slipCount, slipProbability, slipBusy, slipHash, bounce, onOpenSlip, onOpenParlay, onOpenRecord, onOpenAccuracy }: ConversationViewProps) {
+  const { conversation, pending, failure, status, statusError, draft, setDraft } = chat;
   const messages = conversation.messages;
   const busy = pending !== null;
-  const panel = useRef<HTMLDivElement>(null);
+  const drawer = variant === 'drawer';
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
@@ -153,7 +162,6 @@ export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbabili
   const newChatButton = useRef<HTMLButtonElement>(null);
   const keepButton = useRef<HTMLButtonElement>(null);
   const confirmFocus = useRef<'keep' | 'new' | null>(null);
-  const [draft, setDraft] = useState('');
   const [engineOpen, setEngineOpen] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [announcement, setAnnouncement] = useState('');
@@ -172,25 +180,32 @@ export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbabili
   }, [messages, slipHash]);
 
   useEffect(() => {
-    if (!open) { setEngineOpen(false); setConfirmReset(false); return; }
+    if (!active) { setEngineOpen(false); setConfirmReset(false); return; }
     chat.refreshStatus();
-    const fine = window.matchMedia('(pointer: fine)').matches;
-    (fine ? input.current : title.current)?.focus({ preventScroll: true });
+    if (drawer) {
+      const fine = window.matchMedia('(pointer: fine)').matches;
+      (fine ? input.current : title.current)?.focus({ preventScroll: true });
+    }
     const element = log.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [open, chat.refreshStatus]);
+  }, [active, drawer, chat.refreshStatus]);
+
+  /** Escape closes the innermost thing first: the engine note, then the reset confirmation, then the drawer. */
+  const escape = (): boolean => {
+    if (engineOpen) { setEngineOpen(false); engineButton.current?.focus(); return true; }
+    if (confirmReset) { askReset(false); return true; }
+    return false;
+  };
 
   useEffect(() => {
-    if (!open) return;
+    if (!active || !drawer) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing) return;
-      if (engineOpen) { setEngineOpen(false); engineButton.current?.focus(); return; }
-      if (confirmReset) { askReset(false); return; }
-      onClose();
+      if (!escape()) onClose?.();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose, engineOpen, confirmReset]);
+  }, [active, drawer, onClose, engineOpen, confirmReset]);
 
   useEffect(() => {
     const target = confirmFocus.current === 'keep' ? keepButton.current : confirmFocus.current === 'new' ? newChatButton.current : null;
@@ -203,7 +218,7 @@ export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbabili
   // Keep the newest turn in view: the bottom after a send, the top of a reply that is taller than the log.
   useLayoutEffect(() => {
     const element = log.current;
-    if (!element || !open) return;
+    if (!element || !active) return;
     const behavior: ScrollBehavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
     if (!busy && last?.role === 'coach') {
       const node = element.querySelector<HTMLElement>(`[data-message="${last.id}"]`);
@@ -241,6 +256,108 @@ export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbabili
   const onComposerKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); }
   };
+  const resetChat = () => {
+    chat.reset();
+    setConfirmReset(false);
+    requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
+  };
+
+  const answered = (index: number) => messages[index + 1]?.role === 'coach';
+  const showFailure = !busy && last?.role === 'user';
+  const legsText = `${slipCount} ${slipCount === 1 ? 'leg' : 'legs'}`;
+
+  const engineBadge = <button ref={engineButton} type="button" className={`engine-badge ${engine.tone}`} aria-expanded={engineOpen} aria-controls="chat-engine-detail" onClick={() => setEngineOpen(value => !value)}>
+    <span className="engine-badge-dot" aria-hidden="true" /><span className="engine-badge-text"><span className="sr-only">Engine: </span>{engine.text}</span><Info size={13} aria-hidden="true" />
+  </button>;
+  const engineDetail = <div id="chat-engine-detail" className="engine-detail" hidden={!engineOpen}>
+    {status ? <>
+      <RichText text={status.detail} />
+      {status.endpoint && <p className="engine-endpoint">Endpoint: <code>{status.endpoint}</code></p>}
+    </> : <p>{statusError ? `The assistant status couldn’t be loaded. ${statusError}` : 'Checking which engine is answering…'}</p>}
+    <p className="engine-promise">Every number comes from COURTSIDE’s own forecast and parlay tools.</p>
+  </div>;
+  const toolbar = <div className="chat-toolbar">
+    <button id="chat-slip-chip" type="button" className={`chat-slip-chip${slipCount ? ' has-legs' : ''}`} onClick={onOpenSlip}
+      aria-label={`Parlay slip: ${legsText}${slipCount && slipProbability !== null && !slipBusy ? `, all hit ${chance(slipProbability)}` : ''}. Open the slip.`}>
+      <span className="chat-slip-ball" aria-hidden="true"><Ball /><span key={bounce} className={`chat-slip-count${bounce ? ' bounce' : ''}`}>{slipCount}</span></span>
+      <span className="chat-slip-text" aria-hidden="true">{slipCount ? legsText : 'Slip empty'}</span>
+      {slipCount > 0 && <span className="chat-slip-prob" aria-hidden="true">{slipBusy ? '…' : slipProbability !== null ? chance(slipProbability) : '—'}</span>}
+    </button>
+    {!drawer && engineBadge}
+    {confirmReset
+      ? <div className="chat-reset-confirm" role="group" aria-label="Confirm starting a new chat"><span>Start over?</span><button type="button" className="danger-button" onClick={resetChat}>New chat</button><button ref={keepButton} type="button" className="text-button" onClick={() => askReset(false)}>Keep</button></div>
+      : <button ref={newChatButton} type="button" className="text-button chat-new" disabled={!messages.length && !busy} onClick={() => askReset(true)}><SquarePen size={14} aria-hidden="true" />New chat</button>}
+  </div>;
+
+  const body: ReactNode = <>
+    <header className={`chat-header${drawer ? '' : ' chat-page-header'}`}>
+      {drawer && <div className="chat-header-main">
+        <span className="chat-header-mark" aria-hidden="true"><CoachMark /></span>
+        <div className="chat-heading">
+          <span className="eyebrow">THE HUDDLE</span>
+          <h2 id="chat-title" ref={title} tabIndex={-1}>Coach</h2>
+          <p id="chat-subtitle" className="sr-only">Ask about your bets and parlay slip, compare a price with the house, or build the slip by command.</p>
+        </div>
+        {engineBadge}
+        <button type="button" className="icon-button chat-close" aria-label="Close Coach" onClick={onClose}><X size={18} aria-hidden="true" /></button>
+      </div>}
+      {drawer ? <>{engineDetail}{toolbar}</> : <>{toolbar}{engineDetail}</>}
+    </header>
+    <div className="chat-log" ref={log} tabIndex={0} role="region" aria-label="Conversation with Coach">
+      {!messages.length && !busy ? <div className="chat-empty">
+        <HuddleArt />
+        <h3>What’s the play?</h3>
+        <p>Ask about your slip, check a price against the house, or build the parlay by command. Coach runs the same models as the rest of COURTSIDE.</p>
+        <ul className="chat-starters" aria-label="Try asking">{starterPrompts.map(prompt => <li key={prompt}>
+          <button type="button" className="chat-starter" onClick={() => sendQuick(prompt)}><span>{prompt}</span><ArrowUpRight size={15} aria-hidden="true" /></button>
+        </li>)}</ul>
+      </div> : <ol className="chat-messages">
+        {messages.map((message: ChatMessage, index) => message.role === 'user'
+          ? <UserTurn key={message.id} message={message} answered={answered(index) || index === messages.length - 1} />
+          : <CoachTurn key={message.id} message={message} latest={index === messages.length - 1} undoable={message.id === undoId} busy={busy}
+            feedbackError={chat.feedbackError?.messageId === message.id ? chat.feedbackError.message : null}
+            onSend={sendQuick} onRate={chat.rate} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} onOpenAccuracy={onOpenAccuracy} />)}
+        {busy && <li className="chat-turn coach thinking">
+          <span className="chat-avatar" aria-hidden="true"><CoachMark /></span>
+          <div className="chat-bubble coach-bubble thinking-bubble" role="status"><DribbleBall /><span>Coach is drawing up the play…</span></div>
+        </li>}
+      </ol>}
+      {showFailure && <div className={`chat-failure${failure?.stopped ? ' stopped' : ''}`} role={failure && !failure.stopped ? 'alert' : undefined}>
+        <CircleAlert size={16} aria-hidden="true" />
+        <span>{failure ? failure.message : 'Coach hasn’t answered this message yet.'}</span>
+        <button type="button" className="text-button" onClick={() => { chat.retry(); afterQuickSend(); }}><RotateCcw size={14} aria-hidden="true" />Retry</button>
+      </div>}
+    </div>
+    <form className="chat-composer" onSubmit={submit}>
+      {focus && <p className="chat-context"><Target size={13} aria-hidden="true" /><span>Props: <strong>{focus.player}</strong> · {statNames[focus.stat]} {focus.line}</span></p>}
+      <div className={`chat-input-row${busy ? ' is-busy' : ''}`}>
+        <label htmlFor="chat-input" className="sr-only">Message Coach</label>
+        <textarea id="chat-input" ref={input} rows={1} maxLength={MAX_MESSAGE_LENGTH} value={draft} placeholder={busy ? 'Coach is answering…' : 'Ask Coach, or say “add Murray over 20.5 points”'}
+          readOnly={busy} aria-disabled={busy || undefined} aria-describedby="chat-hint" spellCheck
+          onChange={event => setDraft(event.target.value.slice(0, MAX_MESSAGE_LENGTH))} onKeyDown={onComposerKey} />
+        {busy
+          ? <button type="button" className="chat-send stop" onClick={chat.stop} aria-label="Stop waiting for Coach" title="Stop"><Square size={14} aria-hidden="true" /></button>
+          : <button type="submit" className="chat-send" aria-disabled={!draft.trim() || undefined} aria-label="Send message" title="Send"><SendHorizontal size={18} aria-hidden="true" /></button>}
+      </div>
+      <div className="chat-composer-foot">
+        <span id="chat-hint">Enter to send · Shift+Enter for a new line</span>
+        {draft.length >= 800 && <span className={`chat-count${remaining <= 0 ? ' at-limit' : ''}`} aria-hidden="true">{draft.length}/{MAX_MESSAGE_LENGTH}</span>}
+        <span className="sr-only" aria-live="polite">{remaining <= 0 ? 'Character limit reached.' : remaining <= 100 ? 'Fewer than 100 characters left.' : ''}</span>
+      </div>
+      <p className="chat-disclaimer">Probabilities, not certainties. Research only, not betting advice.</p>
+    </form>
+    <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
+  </>;
+
+  return <div className={`chat-conversation ${variant}`}
+    onKeyDown={drawer ? undefined : event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing && escape()) event.stopPropagation(); }}>
+    {body}
+  </div>;
+}
+
+/** Coach as a drawer (right side on desktop, a full-height sheet on small screens). */
+export function ChatPanel({ open, onClose, ...props }: ConversationProps & { open: boolean; onClose: () => void }) {
+  const panel = useRef<HTMLDivElement>(null);
   const trapFocus = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Tab' || !panel.current) return;
     const focusable = Array.from(panel.current.querySelectorAll<HTMLElement>(focusableSelector)).filter(element => element.getClientRects().length > 0);
@@ -250,96 +367,40 @@ export function ChatPanel({ chat, open, onClose, focus, slipCount, slipProbabili
     if (event.shiftKey && (document.activeElement === first || !panel.current.contains(document.activeElement))) { event.preventDefault(); lastFocusable.focus(); }
     else if (!event.shiftKey && document.activeElement === lastFocusable) { event.preventDefault(); first.focus(); }
   };
-  const resetChat = () => {
-    chat.reset();
-    setDraft('');
-    setConfirmReset(false);
-    requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
-  };
-
-  const answered = (index: number) => messages[index + 1]?.role === 'coach';
-  const showFailure = !busy && last?.role === 'user';
-  const legsText = `${slipCount} ${slipCount === 1 ? 'leg' : 'legs'}`;
-
   return <div className={`chat-layer${open ? ' open' : ''}`} inert={!open}>
     <div className="chat-backdrop" onClick={onClose} aria-hidden="true" />
     <div className="chat-panel" id="chat-panel" role="dialog" aria-modal="true" aria-labelledby="chat-title" aria-describedby="chat-subtitle" ref={panel} onKeyDown={trapFocus}>
-      <header className="chat-header">
-        <div className="chat-header-main">
-          <span className="chat-header-mark" aria-hidden="true"><CoachMark /></span>
-          <div className="chat-heading">
-            <span className="eyebrow">THE HUDDLE</span>
-            <h2 id="chat-title" ref={title} tabIndex={-1}>Coach</h2>
-            <p id="chat-subtitle" className="sr-only">Ask about your bets and parlay slip, compare a price with the house, or build the slip by command.</p>
-          </div>
-          <button ref={engineButton} type="button" className={`engine-badge ${engine.tone}`} aria-expanded={engineOpen} aria-controls="chat-engine-detail" onClick={() => setEngineOpen(value => !value)}>
-            <span className="engine-badge-dot" aria-hidden="true" /><span className="engine-badge-text"><span className="sr-only">Engine: </span>{engine.text}</span><Info size={13} aria-hidden="true" />
-          </button>
-          <button type="button" className="icon-button chat-close" aria-label="Close Coach" onClick={onClose}><X size={18} aria-hidden="true" /></button>
-        </div>
-        <div id="chat-engine-detail" className="engine-detail" hidden={!engineOpen}>
-          {status ? <>
-            <RichText text={status.detail} />
-            {status.endpoint && <p className="engine-endpoint">Endpoint: <code>{status.endpoint}</code></p>}
-          </> : <p>{statusError ? `The assistant status couldn’t be loaded. ${statusError}` : 'Checking which engine is answering…'}</p>}
-          <p className="engine-promise">Every number comes from COURTSIDE’s own forecast and parlay tools.</p>
-        </div>
-        <div className="chat-toolbar">
-          <button id="chat-slip-chip" type="button" className={`chat-slip-chip${slipCount ? ' has-legs' : ''}`} onClick={onOpenSlip}
-            aria-label={`Parlay slip: ${legsText}${slipCount && slipProbability !== null && !slipBusy ? `, all hit ${chance(slipProbability)}` : ''}. Open the slip.`}>
-            <span className="chat-slip-ball" aria-hidden="true"><Ball /><span key={bounce} className={`chat-slip-count${bounce ? ' bounce' : ''}`}>{slipCount}</span></span>
-            <span className="chat-slip-text" aria-hidden="true">{slipCount ? legsText : 'Slip empty'}</span>
-            {slipCount > 0 && <span className="chat-slip-prob" aria-hidden="true">{slipBusy ? '…' : slipProbability !== null ? chance(slipProbability) : '—'}</span>}
-          </button>
-          {confirmReset
-            ? <div className="chat-reset-confirm" role="group" aria-label="Confirm starting a new chat"><span>Start over?</span><button type="button" className="danger-button" onClick={resetChat}>New chat</button><button ref={keepButton} type="button" className="text-button" onClick={() => askReset(false)}>Keep</button></div>
-            : <button ref={newChatButton} type="button" className="text-button chat-new" disabled={!messages.length && !busy} onClick={() => askReset(true)}><SquarePen size={14} aria-hidden="true" />New chat</button>}
-        </div>
-      </header>
-      <div className="chat-log" ref={log} tabIndex={0} role="region" aria-label="Conversation with Coach">
-        {!messages.length && !busy ? <div className="chat-empty">
-          <HuddleArt />
-          <h3>What’s the play?</h3>
-          <p>Ask about your slip, check a price against the house, or build the parlay by command. Coach runs the same models as the rest of COURTSIDE.</p>
-          <ul className="chat-starters" aria-label="Try asking">{starterPrompts.map(prompt => <li key={prompt}>
-            <button type="button" className="chat-starter" onClick={() => sendQuick(prompt)}><span>{prompt}</span><ArrowUpRight size={15} aria-hidden="true" /></button>
-          </li>)}</ul>
-        </div> : <ol className="chat-messages">
-          {messages.map((message: ChatMessage, index) => message.role === 'user'
-            ? <UserTurn key={message.id} message={message} answered={answered(index) || index === messages.length - 1} />
-            : <CoachTurn key={message.id} message={message} latest={index === messages.length - 1} undoable={message.id === undoId} busy={busy}
-              feedbackError={chat.feedbackError?.messageId === message.id ? chat.feedbackError.message : null}
-              onSend={sendQuick} onRate={chat.rate} onOpenParlay={onOpenParlay} onOpenRecord={onOpenRecord} />)}
-          {busy && <li className="chat-turn coach thinking">
-            <span className="chat-avatar" aria-hidden="true"><CoachMark /></span>
-            <div className="chat-bubble coach-bubble thinking-bubble" role="status"><DribbleBall /><span>Coach is drawing up the play…</span></div>
-          </li>}
-        </ol>}
-        {showFailure && <div className={`chat-failure${failure?.stopped ? ' stopped' : ''}`} role={failure && !failure.stopped ? 'alert' : undefined}>
-          <CircleAlert size={16} aria-hidden="true" />
-          <span>{failure ? failure.message : 'Coach hasn’t answered this message yet.'}</span>
-          <button type="button" className="text-button" onClick={() => { chat.retry(); afterQuickSend(); }}><RotateCcw size={14} aria-hidden="true" />Retry</button>
-        </div>}
-      </div>
-      <form className="chat-composer" onSubmit={submit}>
-        {focus && <p className="chat-context"><Target size={13} aria-hidden="true" /><span>Forecast lab: <strong>{focus.player}</strong> · {statNames[focus.stat]} {focus.line}</span></p>}
-        <div className={`chat-input-row${busy ? ' is-busy' : ''}`}>
-          <label htmlFor="chat-input" className="sr-only">Message Coach</label>
-          <textarea id="chat-input" ref={input} rows={1} maxLength={MAX_MESSAGE_LENGTH} value={draft} placeholder={busy ? 'Coach is answering…' : 'Ask Coach, or say “add Murray over 20.5 points”'}
-            readOnly={busy} aria-disabled={busy || undefined} aria-describedby="chat-hint" spellCheck
-            onChange={event => setDraft(event.target.value.slice(0, MAX_MESSAGE_LENGTH))} onKeyDown={onComposerKey} />
-          {busy
-            ? <button type="button" className="chat-send stop" onClick={chat.stop} aria-label="Stop waiting for Coach" title="Stop"><Square size={14} aria-hidden="true" /></button>
-            : <button type="submit" className="chat-send" aria-disabled={!draft.trim() || undefined} aria-label="Send message" title="Send"><SendHorizontal size={18} aria-hidden="true" /></button>}
-        </div>
-        <div className="chat-composer-foot">
-          <span id="chat-hint">Enter to send · Shift+Enter for a new line</span>
-          {draft.length >= 800 && <span className={`chat-count${remaining <= 0 ? ' at-limit' : ''}`} aria-hidden="true">{draft.length}/{MAX_MESSAGE_LENGTH}</span>}
-          <span className="sr-only" aria-live="polite">{remaining <= 0 ? 'Character limit reached.' : remaining <= 100 ? 'Fewer than 100 characters left.' : ''}</span>
-        </div>
-        <p className="chat-disclaimer">Probabilities, not certainties. Research only, not betting advice.</p>
-      </form>
-      <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
+      <ChatConversation {...props} variant="drawer" active={open} onClose={onClose} />
     </div>
+  </div>;
+}
+
+/**
+ * Coach as a page: the same conversation as the drawer, sized to the screen so the composer
+ * always stays clear of the slip ball and the mobile tab bar.
+ */
+export function ChatPage(props: ConversationProps) {
+  const root = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const fit = () => {
+      const box = element.getBoundingClientRect();
+      let top = 0;
+      for (let node: HTMLElement | null = element; node; node = node.offsetParent as HTMLElement | null) top += node.offsetTop;
+      let bottom = window.innerHeight - 20;
+      const bar = document.querySelector<HTMLElement>('.court-nav.bottom');
+      if (bar && bar.getClientRects().length && getComputedStyle(bar).display !== 'none') bottom = Math.min(bottom, bar.getBoundingClientRect().top - 12);
+      const fab = document.getElementById('parlay-slip-button')?.getBoundingClientRect();
+      if (fab && fab.width && fab.left < box.right && fab.right > box.left) bottom = Math.min(bottom, fab.top - 14);
+      element.style.setProperty('--chat-page-height', `${Math.max(440, Math.round(bottom - top))}px`);
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    void document.fonts?.ready.then(fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+  return <div className="chat-page card" ref={root}>
+    <ChatConversation {...props} variant="page" active />
   </div>;
 }

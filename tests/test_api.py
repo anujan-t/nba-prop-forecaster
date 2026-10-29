@@ -15,6 +15,7 @@ from requests.exceptions import Timeout
 from backend.app import create_app
 from backend.data import Store, demo_frame, metadata, read_csv, validate_frame
 from backend.nba import NBAUnavailableError, import_game_logs
+from backend.stats import PROP_STATS
 
 
 class DataTests(unittest.TestCase):
@@ -100,15 +101,26 @@ class APITests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/health").json(), {"status": "ok"})
         datasets = self.client.get("/api/datasets").json()
         self.assertEqual(datasets["datasets"][0]["rows"], 864)
-        self.assertEqual(len(datasets["stats"]), 5)
+        self.assertEqual([stat["id"] for stat in datasets["stats"]], list(PROP_STATS))
+        self.assertEqual({stat["group"] for stat in datasets["stats"]}, {"core", "combo", "shooting", "other", "milestone"})
+        self.assertEqual(datasets["simulation"]["default"], 250_000)
         self.assertEqual(len(self.client.get("/api/players").json()["players"]), 12)
-        response = self.client.post("/api/forecast", json=self.request)
+        response = self.client.post("/api/forecast", json={**self.request, "simulations": 20_000})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["sample_size"], 30)
+        result = response.json()
+        self.assertEqual(result["sample_size"], 60)
+        self.assertEqual(result["resolved_model"], "simulation")
+        self.assertEqual(result["simulation"]["runs"], 20_000)
+        self.assertIsNone(result["calibrated"])
+        self.assertIsNone(result["injury"])
+        combo = self.client.post("/api/forecast", json={**self.request, "stat": "pts_reb_ast", "line": 47.5, "simulations": 20_000})
+        self.assertEqual(combo.status_code, 200, combo.text)
+        self.assertEqual(combo.json()["stat"], "pts_reb_ast")
 
     def test_bad_requests(self):
         for extra in ({"odds_over": 0}, {"line": 2.25}, {"lookback": 1},
-                      {"expected_minutes": -2}, {"stat": "turnovers"},
+                      {"expected_minutes": -2}, {"stat": "turnovers"}, {"stat": "minutes"},
+                      {"stat": "double_double", "line": 1.5}, {"simulations": 5_000_000},
                       {"model": "magic"}, {"rest_days": 31}, {"unknown": True}):
             with self.subTest(extra=extra):
                 result = self.client.post("/api/forecast", json={**self.request, **extra})

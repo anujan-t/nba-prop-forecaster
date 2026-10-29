@@ -4,6 +4,41 @@ COURTSIDE / NBA PLAYER PROP FORECASTER
 A local research application, not a betting service or financial advice.
 Synthetic samples are not real NBA results. No accuracy or profit guarantee.
 
+APP LAYOUT
+  Five tabs: Players (search any current player; sub-tabs Props, Game log,
+  Profile & career, Lines), Parlay, My Bets, News (Headlines, Injury report,
+  Teams & coaches, Roster moves) and Coach. The header menu holds How it
+  works (Method, Accuracy) and Settings (Appearance, Model, Data, Coach).
+  Pages have links such as #/players, #/parlay, #/bets, #/news/injuries,
+  #/news/teams/lal, #/coach, #/how-it-works/accuracy and #/settings/model.
+
+MARKETS (22)
+  Core: points, rebounds, assists, 3-pointers made, steals, blocks, turnovers.
+  Combos: PRA, pts+reb, pts+ast, reb+ast, steals+blocks ("stocks").
+  Shooting: field goals made/attempted, 3-point attempts, free throws
+  made/attempted. Also offensive and defensive rebounds and personal fouls.
+  Milestones: double-double and triple-double (yes/no; the line is 0.5,
+  over = yes). Every market is one integer per game built from box-score
+  columns, so forecasts, backtests, parlays, grading and calibration all use
+  it. Markets beyond the five basic counts need full box scores (NBA history
+  has them; the synthetic fixture and old CSVs do not).
+
+NEWS
+  Headlines (classified as injuries and availability, roster moves, coaches
+  and front office, games, betting and fantasy, or around the league), the
+  league injury report and roster moves come from ESPN's public NBA JSON
+  feeds (site.api.espn.com; unofficial, unauthenticated, may change).
+  Coaching staffs and team playing styles (record, pace, offensive and
+  defensive rating, shot profile, four factors, what each team allows, and
+  Synergy offensive play-type frequencies and efficiency, each with its
+  league rank) come from NBA Stats via nba_api, for this season or last.
+  Feeds are cached: headlines 10 minutes, injuries 15, roster moves 30,
+  team styles 6 hours, coaching staffs 24 hours. If a provider fails, the
+  last saved copy is shown and marked as saved. Players shows whether the
+  selected player is listed and which teammates are out; Props and Parlay
+  warn when a leg's player is listed. Forecasts do NOT adjust for injuries
+  or styles automatically: they assume the player plays his recent role.
+
 DIRECT NBA DATA (DEFAULT APPLICATION WORKFLOW)
   The main selector loads NBA's complete current roster from CommonAllPlayers.
   Search by name or team, optionally filter by franchise, and choose any
@@ -21,7 +56,7 @@ DIRECT NBA DATA (DEFAULT APPLICATION WORKFLOW)
   ambiguous roster rows produce an error rather than a false full-league
   claim. Roster membership does not mean injury-free or available to play.
 
-  Open Player intel for current team, position, jersey, age, height/weight,
+  A player's Game log and Profile & career sub-tabs show current team, position, jersey, age, height/weight,
   draft and school/country information; per-game averages and shooting;
   last-5/10/20, season, home/away and opponent splits; complete game logs;
   and regular-season/playoff career records. Full box score exposes shot
@@ -99,7 +134,8 @@ DATA AND PRIVACY
   evidence that a player produced these statistics or played for that team.
   NBA history is the primary data source. The service may time out or be
   blocked by NBA Stats. Failures are reported, never silently replaced by
-  synthetic data. No live injury/lineup/odds feeds are included.
+  synthetic data. The injury report and headlines in News are read-only
+  feeds that the model does not use; there are no lineup or odds feeds.
   The old CSV endpoints and developer CLI remain for backward compatibility
   but CSV controls are removed from the application. Existing saved data is
   preserved and migrated once to native records; the legacy datasets table
@@ -122,14 +158,47 @@ DATA AND PRIVACY
   resource limits, monitoring and a production deployment design.
 
 MATHEMATICS
+  Game simulator (Auto's choice for every market the box scores support):
+    Each forecast plays the player's next game N times (Settings > Model:
+    100,000 / 250,000 default / 500,000 / 1,000,000; seeded, so identical
+    inputs give identical answers). Per simulated game:
+    - minutes are drawn from recent minutes, recency-weighted (10-game
+      half-life) and kernel-smoothed; a minutes scenario rescales them;
+    - each usage count (2-point and 3-point attempts, free-throw attempts,
+      offensive and defensive rebounds, assists, steals, blocks, turnovers,
+      fouls) gets a per-minute rate drawn around its recency-weighted
+      estimate (gamma, variance = estimation uncertainty), times the minutes;
+    - counts are drawn with the dispersion real box scores show at fixed
+      minutes (binomial when tighter than Poisson, gamma-Poisson when looser;
+      league priors measured on 8,417 player-games, shrunk with 30 games);
+    - makes are binomial from attempts at a shooting percentage drawn from
+      its Beta posterior (league priors 54% / 36% / 78% with 100 / 150 / 25
+      attempts of weight; 30-game half-life); fouls stop at six.
+    Points = 2 x made twos + 3 x made threes + made free throws; every market
+    is counted from the same simulated games. Half-lives: usage and minutes
+    10 games, free-throw attempts and defensive rebounds 12, offensive
+    rebounds and turnovers 15, fouls 20, steals and blocks 30. Rest and
+    opponent factors (shrunk, capped at +/-20%) scale the usage rates.
+    Simulation error of a probability: sqrt(p(1-p)/N), at most 0.10 points
+    at 250,000 games. More simulations reduce that noise only; accuracy comes
+    from the model and is measured by the walk-forward test below.
   Empirical: frequency distribution of trailing observed integer totals.
   Normal: discretized at half-count boundaries and truncated below -0.5.
   Poisson: estimated rate equals trailing mean; assumes variance = mean.
   Negative binomial: moment-matched mean and excess variance; uses the
   Poisson limit when excess variance cannot be estimated.
-  Auto: normal for points/rebounds/assists. For steals/blocks, selects
-  negative binomial if observed variance > 1.5 * mean, otherwise Poisson.
-  This is an explicit heuristic, not automated validated model selection.
+  Auto: the game simulator when the market can be built from the box scores
+  (all 22 with NBA history; points/rebounds/assists/steals/blocks, their
+  combos and milestones with five-count data). Otherwise normal for large
+  counts, negative binomial (variance > 1.5 x mean) or Poisson for small
+  counts, empirical for yes/no markets.
+  Model selection: on 232,288 walk-forward predictions from 8,417 real
+  2024-25 and 2025-26 games (70 players, every third game, 60 prior games,
+  five lines around each trailing median), the simulator beat the previous
+  Auto rule on all 22 markets by log loss (overall 0.5239 -> 0.5150; Brier
+  0.1749 -> 0.1718; Brier was level only on double-doubles). Same-player
+  pairs: "both win" log loss 0.5104 simulated jointly vs 0.5141 with the
+  shared-games correlation and 0.5323 independent (28,464 held-out pairs).
   Context: minutes scaling plus historical per-minute rates for rest
   (0, 1, 2, 3+ days) and opponent, shrunk with a 12-game prior weight.
   Rest/opponent factors are each capped at +/-20%. They are not causal
@@ -137,6 +206,8 @@ MATHEMATICS
   Minutes scenarios outside 10%-300% of trailing minutes are rejected.
   Empirical scenario scaling rounds counts to the nearest integer.
   Game outcomes model the player appearing, not DNP/void-settlement rules.
+  Default lookback: 60 games (recency weights decide how much old games
+  count in the simulator).
 
   American odds: positive a -> 100/(a+100); negative a -> |a|/(|a|+100).
   No-vig: divide each implied probability by their two-sided sum.
@@ -152,9 +223,13 @@ EVALUATION
   Walk-forward: start after 15 games; train only on older rows. The
   lookback is 10-82 games. No random train/test split or future game leakage.
   Historical target-game minutes are NEVER used as a predictive input.
-  Rest and opponent come from the schedule; minutes use the trailing mean.
+  Rest and opponent come from the schedule; minutes use the trailing mean
+  (analytic models) or the recent minutes distribution (game simulator).
   A line is either fixed by the user or generated as prior median rounded
-  down plus 0.5. Neither mode represents archived sportsbook market lines.
+  down plus 0.5 (0.5 for yes/no markets). Neither mode represents archived
+  sportsbook market lines.
+  The game simulator scores each held-out game from 8,000 simulated games
+  (simulation error well below the forecast error being measured).
   Pushes are excluded; scoring uses conditional settled probabilities.
   A 1e-6 symmetric prior handles degenerate all-push predictions.
   Brier = mean((probability - outcome)^2); lower is better.
@@ -172,10 +247,15 @@ LINE MOVEMENT
   date/book. No sportsbook scraping, paid API or automatic wagering.
 
 PARLAY BUILDER
-  Combine 1-10 legs (player, stat, line, over/under). Each player+stat pair
-  may appear once. Each leg uses exactly the Forecast lab model and settings.
-  Linked legs (same player, or players whose latest game was for the same
-  team) are joined with a Gaussian copula:
+  Combine 1-10 legs (player, market, line, over/under). Each player+market
+  pair may appear once. Each leg uses exactly the Props view model and
+  settings.
+  Same-player legs on the game simulator are priced jointly: the chance
+  that they all win is the share of the same simulated games in which they
+  all win (exact under the model). Each such pair also reports the latent
+  correlation that reproduces its simulated joint chance.
+  Other linked legs (same player on an analytic model, or players whose
+  latest game was for the same team) are joined with a Gaussian copula:
     - Spearman rank correlation over shared games: each player's last 30
       games (or a longer lookback), matched on date and team for teammates.
     - Latent correlation = 2*sin(pi*rho_s/6), shrunk by n/(n+10) toward
@@ -184,7 +264,9 @@ PARLAY BUILDER
     - The joint win probability is the multivariate normal orthant
       probability (Genz algorithm, fixed seed), bounded by the Frechet
       limits; an invalid correlation matrix is repaired by eigenvalue
-      clipping and reported.
+      clipping and reported. Each simulated same-player block is replaced
+      by its exact simulated chance (the copula carries links between
+      blocks).
   Players on different current teams are treated as independent, even if
   they meet in the same game (head-to-head linkage is not modelled).
   A push counts as not winning. When a whole-number line can push, the
@@ -199,6 +281,8 @@ COURTSIDE COACH (CHAT)
   parser understands slip commands and common questions and calls the same
   forecast, parlay and history code as the UI.
     Build:    "add Jokic over 26.5 points and Murray 21+ points",
+              "add Jokic over 45.5 PRA", "Curry over 4.5 threes",
+              "Gobert over 2.5 steals + blocks", "add Jokic double-double",
               "remove leg 2", "flip the Murray leg", "change leg 1 line to
               27.5", "make it the under", "undo", "clear my slip"
     Price:    "what are my odds?", "book has it at +450, good price?",
@@ -223,26 +307,36 @@ COURTSIDE COACH (CHAT)
   falls back to the built-in coach. Keys are never logged or returned.
 
 GETTING SMARTER OVER TIME
-  1. Track record: tracked bets are graded from NBA box scores the day after
+  1. My Bets: tracked bets are graded from NBA box scores the day after
      their game date (won/lost/push; void if the player has no game that
      date). ROI, legs won vs expected and Brier score are reported.
-  2. Calibration: walk-forward predictions on every stored player history
-     (several lines around each rolling median) plus graded legs are fitted
-     with logistic recalibration (logit q = a + b logit p, ridge-shrunk to
-     the identity). It is switched on only if it beats the raw model on the
-     most recent 25% of graded predictions; then calibrated probabilities
-     appear beside the raw ones. It refits in the background when new games
-     are imported or bets are graded.
+  2. Calibration, separately for every market: walk-forward predictions
+     from Auto on every stored player history (several lines around each
+     rolling median; 0.5 for yes/no markets) plus graded legs. A shared
+     logistic recalibration (logit q = a + b logit p, ridge-shrunk to the
+     identity) is fitted on the older three quarters (by date) and tested on
+     the newest quarter. Each market then fits its own correction, shrunk
+     toward the shared one, and keeps whichever of its own, the shared one or
+     the raw model scored best on its share of the newest quarter (better
+     log loss by > 0.001 and no worse Brier); markets with fewer than 100
+     recent and 100 older predictions use the shared correction when it is
+     on. Calibrated probabilities appear beside the raw ones for Auto
+     forecasts, chat answers and parlays. It refits in the background when
+     new games are imported or bets are graded; a calibration learned on an
+     older model version is never applied (it is rebuilt).
   3. Memory: learned nicknames, and thumbs up/down on replies; liked replies
      become examples for the language model.
 
 PROJECT STATUS
-  Implemented: synthetic pipeline; models; odds; calibration/Brier scoring;
-  scenario features; complete current-roster discovery; current player
-  profiles; detailed box scores/splits/shooting; career history; direct NBA
-  history with cache/refresh; legacy CSV support; persistent line tracking;
-  correlation-aware parlay builder; chat coach with slip commands; bet
-  tracker with automatic grading; calibration learned from results.
+  Implemented: synthetic pipeline; models; game simulator; 22 markets
+  (counts, combos, shooting, milestones); odds; per-market calibration and
+  Brier scoring; scenario features; complete current-roster discovery;
+  current player profiles; detailed box scores/splits/shooting; career
+  history; direct NBA history with cache/refresh; legacy CSV support;
+  persistent line tracking; correlation-aware parlay builder with joint
+  same-player pricing; chat coach with slip commands; bet tracker with
+  automatic grading; calibration learned from results; newsroom (headlines,
+  injury report, roster moves, coaching staffs, team playing styles).
   Primary endpoints:
     GET /api/nba/roster
     GET /api/nba/players?search=<name> (all current matches, no result cap)
@@ -250,10 +344,22 @@ PROJECT STATUS
     GET /api/nba/players/{id}/career
     POST /api/nba/player-history
       {player_id, window:"recent" or "2025-26", season_type, refresh:false}
+    POST /api/forecast
+      {dataset_id, player_id, stat (any of the 22 market ids), line, model
+       ("auto", "simulation", "empirical", "normal", "poisson",
+       "negative_binomial"), lookback, odds_over, odds_under,
+       expected_minutes, rest_days, opponent, use_context,
+       simulations: 1,000-1,000,000 or null for 250,000}
     POST /api/parlay
       {legs:[{dataset_id, player_id, stat, line, side:"over"|"under",
               model, lookback, expected_minutes, rest_days, opponent,
-              use_context}], book_odds: American odds or null}
+              use_context}], book_odds: American odds or null,
+       simulations: optional}
+    GET /api/datasets (also lists the markets and simulation choices)
+    GET /api/news/headlines | /injuries | /transactions | /coaches
+    GET /api/news/teams?season=current|previous, GET /api/news/teams/{abbr}
+    GET /api/news/players/{id} (injury status, teammates listed, headlines)
+      Each accepts refresh=true to bypass the cache.
     POST /api/assistant/chat {message, conversation_id, slip, focus}
     POST /api/assistant/feedback, GET /api/assistant/status
     GET|POST /api/ledger, POST /api/ledger/settle, DELETE /api/ledger/{id}
@@ -265,6 +371,7 @@ PROJECT STATUS
   Legacy /api/nba/history still accepts player_ids batches for saved
   research studies. This batch limit is NOT a limit on player access.
   /api/datasets/nba is a deprecated compatibility alias.
-  Future work: verified injury/minutes forecasts,
-  licensed historical odds, prospective real-data evaluation and deployment.
+  Future work: injury-aware minutes and usage (teammate on/off splits),
+  opponent pace and defense adjustments from the team style data, licensed
+  historical odds, prospective real-data evaluation and deployment.
   Source repository: https://github.com/anujan-t/nba-prop-forecaster

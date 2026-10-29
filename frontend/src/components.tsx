@@ -1,5 +1,5 @@
 import { AlertCircle, ArrowUpRight } from 'lucide-react';
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import { ballSeams } from './motion';
 
 export function Basketball({ className = '' }: { className?: string }) {
@@ -80,8 +80,8 @@ export function EmptyState({ icon, title, children, action }: { icon?: ReactNode
   return <div className="empty-state"><div className="empty-icon">{icon ?? <Basketball />}</div><h3>{title}</h3><p>{children}</p>{action}</div>;
 }
 
-export function SectionHeading({ eyebrow, title, children }: { eyebrow?: string; title: string; children?: ReactNode }) {
-  return <div className="section-heading"><div className="section-heading-copy">{eyebrow && <span className="eyebrow"><CourtLines />{eyebrow}</span>}<h2>{title}</h2></div>{children}</div>;
+export function SectionHeading({ eyebrow, title, children, id, headingRef }: { eyebrow?: string; title: string; children?: ReactNode; id?: string; headingRef?: Ref<HTMLHeadingElement> }) {
+  return <div className="section-heading"><div className="section-heading-copy">{eyebrow && <span className="eyebrow"><CourtLines />{eyebrow}</span>}<h2 id={id} ref={headingRef} tabIndex={id ? -1 : undefined}>{title}</h2></div>{children}</div>;
 }
 
 export function Field({ label, children, hint, className = '' }: { label: string; children: ReactNode; hint?: string; className?: string }) {

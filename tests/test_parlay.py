@@ -10,23 +10,24 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.data import metadata, validate_frame
-from backend.engine import forecast, profit_per_unit
-from backend.parlay import LegNotFound, fair_odds, orthant, price_parlay, valid_correlation
+from backend.engine import forecast, market_simulation, profit_per_unit
+from backend.parlay import LegNotFound, fair_odds, orthant, price_parlay, tetrachoric, valid_correlation
 
 
 def season(seed: int = 7, games: int = 60, guard_games: list[int] | None = None) -> pd.DataFrame:
-    """Two DEN teammates whose stats share a game-level factor, plus an unrelated BOS player."""
+    """Two DEN teammates whose minutes and production share a game-level factor, plus an unrelated BOS player."""
     rng = np.random.default_rng(seed)
     start = date(2025, 10, 21)
     rows = []
     for game in range(games):
         day = (start + timedelta(days=2 * game)).isoformat()
         pace, other = rng.normal(size=2)
-        center = dict(points=25 + 6 * pace, rebounds=12 + 3 * rng.normal(), assists=9 + 2.5 * (0.85 * pace + 0.5 * other),
-                      steals=rng.poisson(1.3), blocks=rng.poisson(0.8))
+        minutes = float(np.clip(34 + 6 * pace, 18, 46))
+        center = dict(points=0.74 * minutes + 2.5 * rng.normal(), rebounds=12 + 3 * rng.normal(),
+                      assists=0.27 * minutes + 1.2 * (0.5 * other + rng.normal()), steals=rng.poisson(1.3), blocks=rng.poisson(0.8))
         guard = dict(points=20 + 5 * (0.7 * pace + 0.7 * rng.normal()), rebounds=4 + 1.5 * rng.normal(),
                      assists=6 + 2 * rng.normal(), steals=rng.poisson(1.0), blocks=rng.poisson(0.3))
-        rows.append(dict(date=day, player_id="center", player_name="Center", team="DEN", opponent="LAL", minutes=34.0, home=True,
+        rows.append(dict(date=day, player_id="center", player_name="Center", team="DEN", opponent="LAL", minutes=round(minutes, 1), home=True,
                          **{k: max(0, int(round(v))) for k, v in center.items()}))
         if guard_games is None or game in guard_games:
             rows.append(dict(date=day, player_id="guard", player_name="Guard", team="DEN", opponent="LAL", minutes=33.0, home=True,
@@ -62,6 +63,13 @@ class OddsAndProbabilityTests(unittest.TestCase):
         for rho in (-0.6, 0.0, 0.3, 0.8):
             expected = 0.25 + math.asin(rho) / (2 * math.pi)
             self.assertAlmostEqual(orthant([0.5, 0.5], np.array([[1, rho], [rho, 1]])), expected, places=6)
+
+    def test_tetrachoric_inverts_the_orthant(self):
+        for rho in (-0.7, -0.2, 0.0, 0.35, 0.9):
+            joint = 0.25 + math.asin(rho) / (2 * math.pi)
+            self.assertAlmostEqual(tetrachoric(0.5, 0.5, joint), rho, places=3)
+        self.assertEqual(tetrachoric(0.0, 0.5, 0.0), 0.0)
+        self.assertAlmostEqual(tetrachoric(0.3, 0.6, 0.3), 0.98, places=3)  # the Fréchet upper bound
 
     def test_orthant_edge_cases(self):
         correlation = np.array([[1, 0.5, 0.2], [0.5, 1, 0.1], [0.2, 0.1, 1]])
@@ -111,15 +119,33 @@ class ParlayTests(unittest.TestCase):
     def test_same_player_correlation_raises_overs_and_lowers_mixed_sides(self):
         together = self.price([leg("center", "points", 24.5), leg("center", "assists", 8.5)])
         pair = together["pairs"][0]
-        self.assertEqual((pair["basis"], pair["games"]), ("same_player", 30))
+        self.assertEqual((pair["basis"], pair["games"], pair["source"]), ("same_player", 30, "simulation"))
+        self.assertEqual(pair["simulations"], 250_000)
         self.assertGreater(pair["rank_correlation"], 0.4)
         self.assertGreater(together["probability"], together["independent_probability"])
         self.assertLessEqual(together["probability"], min(leg["probability"] for leg in together["legs"]))
         self.assertGreater(together["correlation_lift"], 1)
-        self.assertIn("tend to win together", pair["note"])
+        self.assertIn("priced jointly from 250,000 simulated games", pair["note"])
+        self.assertIn("win together", pair["note"])
         mixed = self.price([leg("center", "points", 24.5), leg("center", "assists", 8.5, "under")])
         self.assertLess(mixed["probability"], mixed["independent_probability"])
         self.assertIn("work against each other", mixed["pairs"][0]["note"])
+
+    def test_same_player_block_is_the_exact_simulated_joint(self):
+        legs = [leg("center", "points", 24.5), leg("center", "assists", 8.5), leg("center", "rebounds", 11.5, "under")]
+        result = self.price(legs)
+        frame, info = self.load("logs")
+        draws = market_simulation(frame, {**legs[0], "simulations": 250_000})
+        wins = (draws.market("points") > 24.5) & (draws.market("assists") > 8.5) & (draws.market("rebounds") < 11.5)
+        self.assertAlmostEqual(result["probability"], float(wins.mean()), places=12)
+        self.assertEqual(result["history"][0]["model_probability"], float(wins.mean()))
+
+    def test_copula_links_same_player_legs_on_analytic_models(self):
+        together = self.price([leg("center", "points", 24.5, model="normal"), leg("center", "assists", 8.5, model="normal")])
+        pair = together["pairs"][0]
+        self.assertEqual((pair["source"], pair["simulations"]), ("history", None))
+        self.assertIn("rank correlation", pair["note"])
+        self.assertGreater(together["probability"], together["independent_probability"])
 
     def test_teammates_are_linked_through_shared_games(self):
         result = self.price([leg("center", "points", 24.5), leg("guard", "points", 19.5)])

@@ -6,7 +6,7 @@ import numpy as np
 from backend.data import demo_frame, metadata
 from backend.engine import (
     MODELS, american_probability, backtest, context_adjustment,
-    fit_distribution, forecast, market_comparison,
+    fit_distribution, forecast, market_comparison, resolve_model,
 )
 
 
@@ -83,7 +83,14 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(distribution.model, "negative_binomial")
         self.assertAlmostEqual(distribution.mean, 2)
         self.assertGreater(distribution.std ** 2, distribution.mean)
-        self.assertEqual(fit_distribution(history, "blocks", "auto").model, "negative_binomial")
+        # Auto runs the game simulator when it can build the market; otherwise the analytic rule picks a count model.
+        self.assertEqual(fit_distribution(history, "blocks", "auto").model, "simulation")
+        fouls = history.assign(fouls=[0, 0, 0, 0, 10] * 6)
+        self.assertEqual(resolve_model(fouls, "fouls", "auto"), "negative_binomial")
+        self.assertEqual(resolve_model(fouls.assign(fouls=2), "fouls", "auto"), "poisson")
+        self.assertEqual(resolve_model(history, "points", "normal"), "normal")
+        with self.assertRaisesRegex(ValueError, "yes/no market"):
+            resolve_model(history.assign(double_double=0), "double_double", "normal")
 
     def test_normal_summary_matches_discrete_distribution(self):
         distribution = fit_distribution(self.history, "blocks", "normal")
@@ -116,14 +123,43 @@ class ForecastTests(unittest.TestCase):
         info = metadata(frame, "demo", "Synthetic", "synthetic")
         result = forecast(frame, info, {
             "player_id": "203999", "stat": "points", "model": "auto", "lookback": 30,
-            "line": 26.5, "use_context": True, "odds_over": -110, "odds_under": -110,
+            "line": 26.5, "use_context": True, "odds_over": -110, "odds_under": -110, "simulations": 20_000,
         })
         self.assertEqual(result["sample_size"], 30)
-        self.assertEqual(result["resolved_model"], "normal")
-        self.assertEqual(len(result["comparisons"]), 4)
+        self.assertEqual(result["resolved_model"], "simulation")
+        self.assertEqual(result["simulation"]["runs"], 20_000)
+        self.assertEqual(result["simulation"]["box_score"], "basic")
+        self.assertLess(result["simulation"]["standard_error"], 0.004)
+        self.assertEqual([row["model"] for row in result["comparisons"]], ["empirical", "normal", "poisson", "negative_binomial", "simulation"])
         self.assertTrue(any("Synthetic" in text for text in result["warnings"]))
         self.assertEqual(result["history"], sorted(result["history"], key=lambda row: row["date"]))
         self.assertLessEqual(result["interval"]["low"], result["interval"]["high"])
+        probabilities = result["probabilities"]
+        self.assertAlmostEqual(probabilities["over"] + probabilities["under"] + probabilities["push"], 1)
+        # The simulator is seeded: the same request gives the same answer.
+        again = forecast(frame, info, {
+            "player_id": "203999", "stat": "points", "model": "auto", "lookback": 30,
+            "line": 26.5, "use_context": True, "odds_over": -110, "odds_under": -110, "simulations": 20_000,
+        })
+        self.assertEqual(again["probabilities"], probabilities)
+
+    def test_combos_and_milestones(self):
+        frame = demo_frame()
+        info = metadata(frame, "demo", "Synthetic", "synthetic")
+        base = {"player_id": "203999", "model": "auto", "lookback": 30, "use_context": True, "odds_over": -110,
+                "odds_under": -110, "simulations": 20_000}
+        pra = forecast(frame, info, {**base, "stat": "pts_reb_ast", "line": 47.5})
+        history = frame[frame["player_id"] == "203999"].tail(30)
+        self.assertEqual(pra["summary"]["observed_mean"], float((history["points"] + history["rebounds"] + history["assists"]).mean()))
+        self.assertAlmostEqual(pra["summary"]["mean"], pra["summary"]["observed_mean"], delta=2.5)
+        double = forecast(frame, info, {**base, "stat": "double_double", "line": 0.5})
+        self.assertEqual(double["resolved_model"], "simulation")
+        self.assertTrue(0 <= double["probabilities"]["over"] <= 1)
+        self.assertEqual(double["probabilities"]["push"], 0)
+        with self.assertRaisesRegex(ValueError, "yes/no market"):
+            forecast(frame, info, {**base, "stat": "double_double", "line": 1.5})
+        with self.assertRaisesRegex(ValueError, "box-score details"):
+            forecast(frame, info, {**base, "stat": "threes", "line": 2.5})
 
     def test_insufficient_data_is_explicit(self):
         frame = demo_frame().query("player_id == '203999'").head(5)
@@ -147,7 +183,8 @@ class BacktestTests(unittest.TestCase):
         score = np.mean([(row["probability"] - row["outcome"]) ** 2 for row in result["predictions"]])
         self.assertAlmostEqual(result["brier_score"], score)
         self.assertEqual(sum(row["count"] for row in result["calibration"]), result["evaluations"])
-        self.assertEqual(len(result["model_scores"]), 5)
+        self.assertEqual([row["model"] for row in result["model_scores"]],
+                         ["empirical", "normal", "poisson", "negative_binomial", "simulation", "auto"])
         self.assertTrue(all(row["evaluations"] == result["evaluations"] for row in result["model_scores"]))
         self.assertAlmostEqual(result["skill_score"], 1 - result["brier_score"] / 0.25)
 

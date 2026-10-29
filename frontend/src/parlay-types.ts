@@ -1,4 +1,4 @@
-import type { Model, Stat } from './types';
+import type { InjuryEntry, Model, Stat } from './types';
 
 /** API contract for POST /api/parlay. Probabilities are 0–1 fractions. */
 
@@ -9,7 +9,7 @@ export interface ParlayLegRequest {
   dataset_id: string;
   player_id: string;
   stat: Stat;
-  line: number; // whole or half point, 0–200
+  line: number; // whole or half point, 0–200 (0.5 for yes/no markets)
   side: Side;
   model: Model;
   lookback: number; // 10–82
@@ -22,6 +22,7 @@ export interface ParlayLegRequest {
 export interface ParlayRequest {
   legs: ParlayLegRequest[]; // 1–10 legs; each player + stat pair may appear only once (422 otherwise)
   book_odds: number | null; // optional American odds offered for the whole parlay, e.g. 450 or -120
+  simulations?: number; // games simulated per player for legs on the game simulator
 }
 
 export interface FairOdds {
@@ -43,6 +44,8 @@ export interface ParlayLeg {
   push: number; // P(stat lands exactly on the line); 0 for half-point lines
   hit_rate: { hits: number; games: number }; // how often this leg would have won in the sample games
   fair_odds: FairOdds | null; // null when probability is 0 or 1
+  simulations: number | null; // simulated games behind this leg, when its model is the game simulator
+  injury?: InjuryEntry | null; // the player's entry on the last saved injury report
 }
 
 /** How two legs are linked. Players on different current teams are treated as independent. */
@@ -55,6 +58,8 @@ export interface ParlayPair {
   games: number; // shared games used for the estimate (0 when independent)
   rank_correlation: number | null; // Spearman correlation of the two stats over shared games
   correlation: number; // latent correlation used in the joint model (after shrinkage), between the two stats; 0 if independent
+  source: 'simulation' | 'history' | 'none'; // simulation: same-player legs priced jointly from the same simulated games
+  simulations: number | null;
   note: string; // one plain-English sentence
 }
 
@@ -87,6 +92,7 @@ export interface ParlayResult {
     samples: number; // graded predictions behind the calibration
     note: string;
   }; // null until calibration is active
+  simulations: number | null; // simulated games per player behind simulator legs; null when no leg uses the simulator
   method: string; // short plain-English description of the calculation
   warnings: string[]; // de-duplicated warnings for the whole slip
   computed_at: string; // ISO timestamp

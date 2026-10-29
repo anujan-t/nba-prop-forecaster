@@ -1,4 +1,4 @@
-import { modelNames, odds, statNames } from './api';
+import { isMilestone, modelNames, odds, statNames } from './api';
 import type { ChatSlip } from './assistant-types';
 import type { ParlayLegRequest, ParlayPair, ParlayResult, Side } from './parlay-types';
 import type { AppliedForecast, Model, Stat } from './types';
@@ -44,10 +44,12 @@ export function normalizeLine(value: number): number | null {
 }
 
 export function statLabel(stat: Stat): string {
-  return statNames[stat].toLocaleLowerCase();
+  const name = statNames[stat];
+  return name.includes('+') ? name : name.toLocaleLowerCase();
 }
 
 export function legDescription(leg: SlipLeg): string {
+  if (isMilestone(leg.request.stat)) return `${leg.label.player} ${leg.request.side === 'over' ? 'to get a' : 'no'} ${statLabel(leg.request.stat)}`;
   return `${leg.label.player} ${sideNames[leg.request.side]} ${leg.request.line} ${statLabel(leg.request.stat)}`;
 }
 

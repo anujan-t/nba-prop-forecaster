@@ -6,7 +6,8 @@ import { LineHistoryChart } from './Charts';
 import { Busy, EmptyState, ErrorNotice, Field, SectionHeading } from './components';
 import type { AppliedForecast, LineSnapshot } from './types';
 
-export default function LineNotebook({ applied, onForecast }: { applied: AppliedForecast | null; onForecast: () => void }) {
+/** Players › Lines. `prefill` changes when Props asks to save its line: the form resets to the applied line and odds. */
+export default function LineNotebook({ applied, onForecast, prefill = 0 }: { applied: AppliedForecast | null; onForecast: () => void; prefill?: number }) {
   const [eventDate, setEventDate] = useState(tomorrow);
   const [book, setBook] = useState('Manual entry');
   const [line, setLine] = useState('');
@@ -31,7 +32,8 @@ export default function LineNotebook({ applied, onForecast }: { applied: Applied
     setOverOdds(String(appliedOver ?? -110));
     setUnderOdds(String(appliedUnder ?? -110));
     setSaved('');
-  }, [appliedLine, appliedOver, appliedUnder, datasetId, playerId, stat]);
+  }, [appliedLine, appliedOver, appliedUnder, datasetId, playerId, stat, prefill]);
+  useEffect(() => { if (prefill) setSaveError(''); }, [prefill]);
   useEffect(() => {
     saveController.current?.abort();
     setSaving(false);
@@ -73,14 +75,14 @@ export default function LineNotebook({ applied, onForecast }: { applied: Applied
     } catch (error) { if (!isAbort(error)) setSaveError(messageOf(error)); }
     finally { if (!controller.signal.aborted) setSaving(false); }
   }
-  if (!applied) return <article className="card"><EmptyState title="Give your notebook a scenario" icon={<BookOpen size={32} />} action={<button className="primary-button" onClick={onForecast}>Open forecast lab <ArrowRight size={15} /></button>}>Run a forecast first to select a dataset, player, and statistic. Then capture manual lines for a specific game and book.</EmptyState></article>;
+  if (!applied) return <article className="card"><EmptyState title="Give your notebook a scenario" icon={<BookOpen size={32} />} action={<button className="primary-button" onClick={onForecast}>Open Props <ArrowRight size={15} /></button>}>Run a forecast first to select a dataset, player, and statistic. Then capture manual lines for a specific game and book.</EmptyState></article>;
   const grouped = lines.filter(item => item.book === book.trim()).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const movement = grouped.length > 1 ? grouped[grouped.length - 1].line - grouped[0].line : null;
   return <>
     <div className="notice research-notice"><BookOpen size={20} /><div><strong>A notebook, not an odds feed.</strong><p>Record manually observed prices. Snapshots persist on your local server. Charts never join different games, books, players, statistics, or datasets.</p></div></div>
     <article className="card notebook-controls"><SectionHeading eyebrow="CAPTURE WHAT YOU OBSERVE" title="Save a market snapshot"><span className="pill">{applied.data.player.name} · {statNames[stat]}</span></SectionHeading>
       <form onSubmit={save}>
-        <div className="snapshot-fields"><Field label="Event date"><input type="date" value={eventDate} onChange={event => { setEventDate(event.target.value); setSaved(''); }} required disabled={saving} /></Field>
+        <div className="snapshot-fields"><Field label="Event date"><input id="line-event-date" type="date" value={eventDate} onChange={event => { setEventDate(event.target.value); setSaved(''); }} required disabled={saving} /></Field>
           <Field label="Book / source"><input list="known-books" maxLength={60} value={book} onChange={event => { setBook(event.target.value); setSaved(''); }} required disabled={saving} /><datalist id="known-books">{[...new Set(lines.map(item => item.book))].map(name => <option value={name} key={name} />)}</datalist></Field>
           <Field label="Line"><input type="number" min="0" max="200" step="0.5" required value={line} onChange={event => setLine(event.target.value)} disabled={saving} /></Field>
           <Field label="Over odds"><input type="number" min="-10000" max="10000" step="1" required value={overOdds} onChange={event => setOverOdds(event.target.value)} disabled={saving} /></Field>

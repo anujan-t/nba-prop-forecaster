@@ -1,6 +1,12 @@
-export type Stat = 'points' | 'rebounds' | 'assists' | 'steals' | 'blocks';
-export type Model = 'auto' | 'empirical' | 'normal' | 'poisson' | 'negative_binomial';
-export type View = 'forecast' | 'parlay' | 'record' | 'player' | 'validation' | 'notebook' | 'data' | 'methodology';
+export type Stat =
+  | 'points' | 'rebounds' | 'assists' | 'threes' | 'steals' | 'blocks' | 'turnovers'
+  | 'pts_reb_ast' | 'pts_reb' | 'pts_ast' | 'reb_ast' | 'stocks'
+  | 'field_goals_made' | 'field_goals_attempted' | 'threes_attempted' | 'free_throws_made' | 'free_throws_attempted'
+  | 'offensive_rebounds' | 'defensive_rebounds' | 'fouls'
+  | 'double_double' | 'triple_double';
+/** The five box-score counts every game log carries (other markets are built from them or from full box scores). */
+export type BaseStat = 'points' | 'rebounds' | 'assists' | 'steals' | 'blocks';
+export type Model = 'auto' | 'empirical' | 'normal' | 'poisson' | 'negative_binomial' | 'simulation';
 export interface NBAHistoryQuery {
   player_ids: string[];
   season: string;
@@ -27,7 +33,8 @@ export interface Player {
   name: string;
   team: string;
   games: number;
-  averages: Record<Stat | 'minutes', number>;
+  /** The five counts and minutes always; full box-score columns (threes, turnovers, ...) when the history has them. */
+  averages: Record<BaseStat | 'minutes', number> & Partial<Record<string, number>>;
 }
 export interface ForecastRequest {
   dataset_id: string;
@@ -42,6 +49,7 @@ export interface ForecastRequest {
   rest_days: number | null;
   opponent: string | null;
   use_context: boolean;
+  simulations: number;
 }
 export interface ForecastForm {
   player_id: string;
@@ -93,6 +101,36 @@ export interface Forecast {
   comparisons: { model: Model; over: number; under: number; push: number; mean: number }[];
   warnings: string[];
   context_notes: string[];
+  /** Present when the game simulator produced the forecast. */
+  simulation: null | {
+    runs: number;
+    seed: number;
+    standard_error: number; // binomial simulation error of the over probability
+    box_score: 'full' | 'basic'; // full = attempts, makes, splits, turnovers and fouls; basic = the five counts
+    half_life: number;
+    minutes: { mean: number; low: number; high: number }; // simulated minutes, 10th–90th percentile
+  };
+  /** The market's learned correction applied to an Auto forecast, when one is switched on. */
+  calibrated: null | { over: number; under: number; push: number; choice: 'own' | 'shared'; samples: number; note: string };
+  /** The player's entry on the last saved injury report, if listed. */
+  injury: InjuryEntry | null;
+}
+export interface InjuryEntry {
+  player: string;
+  player_id: string | null;
+  position: string | null;
+  team: string | null;
+  status: string;
+  status_key: 'out' | 'suspended' | 'doubtful' | 'questionable' | 'day_to_day' | 'probable' | 'other';
+  date: string | null;
+  injury: string | null;
+  detail: string | null;
+  side: string | null;
+  return_date: string | null;
+  short_comment: string | null;
+  long_comment: string | null;
+  headshot: string | null;
+  report_fetched_at?: string | null;
 }
 export interface AppliedForecast { data: Forecast; request: ForecastRequest }
 export interface BacktestRequest {

@@ -120,7 +120,8 @@ export interface LeagueSelectorProps {
   onSeasonTypeChange: (type: 'Regular Season' | 'Playoffs') => void;
   busy: boolean;
   onReload: () => void;
-  onDetails: () => void;
+  /** Opens Players › Profile & career; the button is hidden when this is omitted (already there). */
+  onDetails?: () => void;
 }
 export interface PlayerIntelligenceProps {
   player: RosterPlayer | null;

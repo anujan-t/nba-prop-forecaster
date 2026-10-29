@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 
 from .data import demo_frame, metadata, read_csv
-from .engine import backtest, forecast
+from .engine import MODELS, backtest, forecast
+from .stats import PROP_STATS
 
 
 def main():
@@ -12,10 +13,10 @@ def main():
     parser.add_argument("--csv", type=Path, help="Use a validated game-log CSV instead of synthetic data")
     parser.add_argument("--output", type=Path, help="Save demo CSV or result JSON")
     parser.add_argument("--player", default="203999")
-    parser.add_argument("--stat", default="points", choices=["points", "rebounds", "assists", "steals", "blocks"])
-    parser.add_argument("--model", default="auto", choices=["auto", "empirical", "normal", "poisson", "negative_binomial"])
+    parser.add_argument("--stat", default="points", choices=list(PROP_STATS))
+    parser.add_argument("--model", default="auto", choices=list(MODELS))
     parser.add_argument("--line", type=float, default=26.5)
-    parser.add_argument("--lookback", type=int, default=30)
+    parser.add_argument("--lookback", type=int, default=60)
     args = parser.parse_args()
     frame = read_csv(args.csv.read_text(encoding="utf-8-sig")) if args.csv else demo_frame()
     if args.command == "demo":

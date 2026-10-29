@@ -126,7 +126,7 @@ export default function LeagueSelector({
         <button type="button" className="secondary-button" onClick={onReload} disabled={busy || !selected}>
           <RefreshCw size={14} className={busy ? 'spin' : ''} aria-hidden="true" />Refresh player
         </button>
-        <button type="button" className="primary-button" onClick={onDetails} disabled={!selected}>Player details <ArrowRight size={15} aria-hidden="true" /></button>
+        {onDetails && <button type="button" className="primary-button" onClick={onDetails} disabled={!selected}>Profile & career <ArrowRight size={15} aria-hidden="true" /></button>}
       </div>
     </div>
     <p className="league-window-note" id={`${controlId}-window-note`}>
@@ -149,7 +149,7 @@ export default function LeagueSelector({
       {busy && <div className="league-player-loading"><Busy text="Loading player data…" /><span>You can select another player while this loads.</span></div>}
     </div>
     <div className="league-roster-provenance">
-      <div><Info size={13} aria-hidden="true" /><span>Roster membership is not medical clearance. No injury or confirmed-lineup feed.</span></div>
+      <div><Info size={13} aria-hidden="true" /><span>Roster membership is not medical clearance. Injury status comes from the league injury report in News; there is no confirmed-lineup feed.</span></div>
       {roster && <p>{roster.provider || 'Provider not reported'} · {roster.season} roster · as of {timestamp(roster.fetched_at)}</p>}
     </div>
   </section>;

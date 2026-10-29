@@ -7,20 +7,67 @@ import difflib
 import re
 import unicodedata
 
-STATS = ("points", "rebounds", "assists", "steals", "blocks")
+STATS = ("points", "rebounds", "assists", "threes", "steals", "blocks", "turnovers", "pts_reb_ast", "pts_reb", "pts_ast",
+         "reb_ast", "stocks", "field_goals_made", "field_goals_attempted", "threes_attempted", "free_throws_made",
+         "free_throws_attempted", "offensive_rebounds", "defensive_rebounds", "fouls", "double_double", "triple_double")
 STAT_WORDS = {
     "points": ("points", "point", "pts", "pt", "pnts", "scoring", "buckets"),
     "rebounds": ("rebounds", "rebound", "rebs", "reb", "boards", "board"),
     "assists": ("assists", "assist", "asts", "ast", "dimes", "dime"),
+    "threes": ("threes", "3pm", "3s", "triples", "treys", "trey", "threepointers"),
     "steals": ("steals", "steal", "stl", "stls"),
     "blocks": ("blocks", "block", "blk", "blks", "swats", "rejections"),
+    "turnovers": ("turnovers", "turnover", "tov", "tovs", "tos"),
+    "pts_reb_ast": ("pra", "p+r+a", "pts+reb+ast", "pts+rebs+asts", "ptsrebast"),
+    "pts_reb": ("pr", "p+r", "pts+reb", "pts+rebs", "ptsreb"),
+    "pts_ast": ("pa", "p+a", "pts+ast", "pts+asts", "ptsast"),
+    "reb_ast": ("ra", "r+a", "reb+ast", "rebs+asts", "rebast"),
+    "stocks": ("stocks", "stock", "s+b", "b+s", "stl+blk", "blk+stl", "stealsblocks"),
+    "field_goals_made": ("fgm", "fieldgoals", "fgmade"),
+    "field_goals_attempted": ("fga", "fieldgoalattempts", "shotattempts"),
+    "threes_attempted": ("3pa", "threeattempts"),
+    "free_throws_made": ("ftm", "freethrows", "fts"),
+    "free_throws_attempted": ("fta", "freethrowattempts"),
+    "offensive_rebounds": ("oreb", "orebs", "offensiverebounds"),
+    "defensive_rebounds": ("dreb", "drebs", "defensiverebounds"),
+    "fouls": ("fouls", "foul", "pf", "personalfouls"),
+    "double_double": ("doubledouble", "dd"),
+    "triple_double": ("tripledouble", "td"),
 }
 STAT_LOOKUP = {word: stat for stat, words in STAT_WORDS.items() for word in words}
+# How the coach writes each market in replies and suggestions; every phrase parses back to the same market.
+STAT_PHRASES = {
+    "points": "points", "rebounds": "rebounds", "assists": "assists", "threes": "threes", "steals": "steals",
+    "blocks": "blocks", "turnovers": "turnovers", "pts_reb_ast": "PRA", "pts_reb": "pts+reb", "pts_ast": "pts+ast",
+    "reb_ast": "reb+ast", "stocks": "stocks", "field_goals_made": "FGM", "field_goals_attempted": "FGA",
+    "threes_attempted": "3PA", "free_throws_made": "FTM", "free_throws_attempted": "FTA",
+    "offensive_rebounds": "offensive rebounds", "defensive_rebounds": "defensive rebounds", "fouls": "fouls",
+    "double_double": "double-double", "triple_double": "triple-double",
+}
+MILESTONES = {"double_double", "triple_double"}
+# Multi-word market names, rewritten to one token before the stat search (longest and most specific first).
+STAT_PHRASE_PATTERNS = (
+    (r"\b(?:points?|pts)\s*(?:\+|,|&|and|plus)?\s*(?:rebounds?|rebs?|boards?)\s*(?:\+|,|&|and|plus)?\s*(?:assists?|asts?|dimes?)\b", "pra"),
+    (r"\b(?:points?|pts)\s*(?:\+|&|and|plus)\s*(?:rebounds?|rebs?|boards?)\b", "ptsreb"),
+    (r"\b(?:points?|pts)\s*(?:\+|&|and|plus)\s*(?:assists?|asts?|dimes?)\b", "ptsast"),
+    (r"\b(?:rebounds?|rebs?|boards?)\s*(?:\+|&|and|plus)\s*(?:assists?|asts?|dimes?)\b", "rebast"),
+    (r"\b(?:steals?|stls?)\s*(?:\+|&|and|plus)\s*(?:blocks?|blks?)\b|\b(?:blocks?|blks?)\s*(?:\+|&|and|plus)\s*(?:steals?|stls?)\b", "stealsblocks"),
+    (r"\b(?:3-?pa|3-?pta|3[- ]?point(?:er)?s?\s+attempt(?:s|ed)?|three[- ]?point(?:er)?s?\s+attempt(?:s|ed)?|three\s+attempts?)\b", "threeattempts"),
+    (r"\b(?:3-?(?:pm|ptm|pt|pts|s)|3[- ]?pointers?(?:\s+made)?|three[- ]?pointers?(?:\s+made)?|(?:three|3)[- ]point(?:er)?s?\s+made)\b", "threes"),
+    (r"\bfree[- ]?throws?\s+attempt(?:s|ed)?\b", "freethrowattempts"),
+    (r"\bfree[- ]?throws?(?:\s+made)?\b", "freethrows"),
+    (r"\bfield[- ]?goals?\s+attempt(?:s|ed)?\b", "fieldgoalattempts"),
+    (r"\bshot\s+attempts?\b", "shotattempts"),
+    (r"\bfield[- ]?goals?(?:\s+made)?\b|\bfg\s+made\b", "fieldgoals"),
+    (r"\boffensive\s+(?:rebounds?|boards?)\b", "offensiverebounds"),
+    (r"\bdefensive\s+(?:rebounds?|boards?)\b", "defensiverebounds"),
+    (r"\bpersonal\s+fouls?\b", "personalfouls"),
+    (r"\bdouble[- ]?doubles?\b", "doubledouble"),
+    (r"\btriple[- ]?doubles?\b", "tripledouble"),
+)
 UNSUPPORTED = {
-    "threes": "three-pointers", "three": "three-pointers", "3s": "three-pointers", "3pm": "three-pointers", "3pt": "three-pointers",
-    "3pts": "three-pointers", "triples": "three-pointers", "pra": "points + rebounds + assists", "turnovers": "turnovers",
-    "tos": "turnovers", "fantasy": "fantasy points", "minutes": "minutes", "mins": "minutes", "doubles": "double-doubles",
-    "double-double": "double-doubles", "triple-double": "triple-doubles",
+    "fantasy": "fantasy points", "minutes": "minutes", "mins": "minutes", "dunks": "dunks", "dunk": "dunks",
+    "plusminus": "plus-minus", "firstbasket": "first basket",
 }
 # Common nicknames; each is used only when its player is on the current roster.
 NICKNAMES = {
@@ -260,8 +307,20 @@ def find_leg_numbers(text: str) -> list[int]:
     return list(dict.fromkeys(numbers))
 
 
+def stat_phrases(text: str) -> str:
+    """Folded text with multi-word market names (PRA, pts+reb, 3-pointers, double-double, ...) as single tokens."""
+    for pattern, token in STAT_PHRASE_PATTERNS:
+        text = re.sub(pattern, f" {token} ", text)
+    return text
+
+
+def phrase(stat: str) -> str:
+    """How the coach writes a market in replies; it parses back to the same market."""
+    return STAT_PHRASES.get(stat, stat)
+
+
 def _prepare(text: str) -> str:
-    t = fold(text)
+    t = stat_phrases(fold(text))
     for word, number in ORDINALS.items():
         t = re.sub(rf"\b{word}\b", f"ord{number}", t)
     t = re.sub(r"(\d)([a-z])", r"\1 \2", t)  # 26.5pts -> 26.5 pts
@@ -310,6 +369,12 @@ def parse_leg(text: str) -> LegSpec:
     if spec.line is not None and (spec.line < 0 or spec.line > 200 or spec.line * 2 != int(spec.line * 2)):
         spec.problem = f"{spec.line:g} is not a valid line: use a whole or half point from 0 to 200."
         spec.line = None
+    if spec.stat in MILESTONES:
+        # Yes/no markets: over 0.5 is "yes", under 0.5 is "no".
+        spec.problem = None
+        spec.line = 0.5
+        if spec.side is None or re.search(r"\b(?:no|not|without|won'?t|fails?\s+to)\b", t):
+            spec.side = "under" if re.search(r"\b(?:no|not|without|won'?t|fails?\s+to|under)\b", t) else "over"
     return spec
 
 

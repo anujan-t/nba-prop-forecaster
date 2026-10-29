@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+import json
 import math
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ from backend.learning import (
     normalize_phrase, recalibrate, tokens, walk_forward_samples,
 )
 from backend.nlu import name_key
+from backend.stats import stat_values
 
 PLAYERS = {"201": ("Alpha One", "DEN"), "202": ("Beta Two", "BOS"), "203": ("Gamma Three", "LAL"), "204": ("Delta Four", "MIA")}
 TEAMS = ("BOS", "LAL", "MIA", "NYK", "PHX", "DEN")
@@ -384,7 +386,8 @@ class TrackTests(TempStoreCase):
             dict(priced=priced_for([slip_leg("201", "points", 23.5, "over")], [0.4])),
             dict(slip_legs=[slip_leg("201", "points", 22.5, "over"), slip_leg("201", "points", 25.5, "over")],
                  priced=priced_for([slip_leg("201", "points", 22.5, "over"), slip_leg("201", "points", 25.5, "over")], [0.6, 0.4])),
-            dict(slip_legs=[slip_leg("201", "turnovers", 2.5, "over")], priced=priced_for([slip_leg("201", "turnovers", 2.5, "over")], [0.5])),
+            dict(slip_legs=[slip_leg("201", "minutes", 2.5, "over")], priced=priced_for([slip_leg("201", "minutes", 2.5, "over")], [0.5])),
+            dict(slip_legs=[slip_leg("201", "double_double", 1.5, "over")], priced=priced_for([slip_leg("201", "double_double", 1.5, "over")], [0.5])),
             dict(slip_legs=[slip_leg("201", "points", 22.3, "over")], priced=priced_for([slip_leg("201", "points", 22.3, "over")], [0.5])),
             dict(priced=priced_for(legs, [1.5])),
         ]
@@ -624,7 +627,12 @@ class WalkForwardTests(unittest.TestCase):
         self.assertTrue(set(samples["date"]) <= set(frame["date"].iloc[15:]))
         self.assertTrue((samples["line"] % 1 == 0.5).all())
         self.assertTrue(samples["p"].between(0, 1).all())
-        actual = frame.melt(id_vars=["date"], value_vars=list(STATS), var_name="stat", value_name="actual")
+        # Every market the box scores support, including combos and milestones (no splits here, so no threes).
+        self.assertEqual(set(samples["stat"]), {"points", "rebounds", "assists", "steals", "blocks", "pts_reb_ast", "pts_reb",
+                                                "pts_ast", "reb_ast", "stocks", "double_double", "triple_double"})
+        self.assertTrue((samples.loc[samples["stat"].isin(["double_double", "triple_double"]), "line"] == 0.5).all())
+        actual = pd.DataFrame({"date": frame["date"], **{stat: stat_values(frame, stat) for stat in set(samples["stat"])}})
+        actual = actual.melt(id_vars=["date"], var_name="stat", value_name="actual")
         merged = samples.merge(actual, on=["date", "stat"])
         self.assertEqual(len(merged), len(samples))
         self.assertTrue(((merged["actual"] > merged["line"]).astype(int) == merged["outcome"]).all())
@@ -697,7 +705,29 @@ class RetrainTests(unittest.TestCase):
         self.assertGreater(calibrated[2], 0.55)
         self.assertGreater(calibrated[1], 0.3)
         self.assertEqual(calibrated, sorted(calibrated))
-        self.assertAlmostEqual(calibrated[2], recalibrate(0.5, self.status["intercept"], self.status["slope"]), places=5)
+        points = next(entry for entry in self.status["stats"] if entry["stat"] == "points")
+        self.assertTrue(points["active"])
+        self.assertAlmostEqual(calibrated[2], recalibrate(0.5, points["intercept"], points["slope"]), places=5)
+        # Without a market the shared correction applies.
+        self.assertAlmostEqual(self.learning.calibrate_over(0.5), recalibrate(0.5, self.status["intercept"], self.status["slope"]), places=5)
+
+    def test_every_market_is_calibrated_separately(self):
+        entries = {entry["stat"]: entry for entry in self.status["stats"]}
+        self.assertTrue({"points", "rebounds", "assists", "steals", "blocks", "pts_reb_ast", "stocks"} <= set(entries))
+        self.assertEqual(sum(entry["samples"] for entry in entries.values()), self.status["samples"])
+        for stat, entry in entries.items():
+            self.assertIn(entry["choice"], ("own", "shared", "none"))
+            self.assertEqual(entry["active"], entry["choice"] != "none")
+            self.assertTrue(entry["message"])
+            if entry["holdout"]:
+                self.assertTrue({"raw_log_loss", "shared_log_loss", "own_log_loss", "raw_brier"} <= set(entry["holdout"]))
+            if entry["choice"] == "own":
+                expected = recalibrate(0.4, entry["params"][1], entry["params"][2])
+                self.assertAlmostEqual(self.learning.calibrate_over(0.4, stat), expected, places=9)
+            if entry["choice"] == "none":
+                self.assertIsNone(self.learning.calibrate_over(0.4, stat))
+        self.assertTrue(any(entry["choice"] == "own" for entry in entries.values()))
+        self.assertRegex(self.status["message"], r"Calibrated per market: \d+ of \d+ use their own correction")
 
     def test_calibrate_over_clips_inputs_and_stays_strictly_inside_0_1(self):
         low, high = self.learning.calibrate_over(0), self.learning.calibrate_over(1.0)
@@ -782,6 +812,20 @@ class SmallDataTests(TempStoreCase):
         status = Learning(Store(Path(self.directory.name) / "empty"), clock=self.clock).retrain()
         self.assertEqual((status["active"], status["samples"], status["players"], status["curve"]), (False, 0, 0, []))
         self.assertTrue(status["message"].startswith("Needs at least 800 graded predictions (has 0)"))
+
+    def test_calibration_from_an_older_model_is_not_applied(self):
+        old = {"active": True, "trained_at": "2026-01-01T00:00:00Z", "samples": 5000, "message": "Learned on the old model."}
+        with self.store.connect() as db:
+            db.execute("""INSERT INTO learning_calibration (id, trained_at, active, intercept, slope, status)
+                VALUES (1, '2026-01-01T00:00:00Z', 1, 0.5, 0.8, ?)""", (json.dumps(old),))
+        learning = Learning(self.store, clock=self.clock)
+        self.assertIsNone(learning.calibrate_over(0.6))
+        self.assertIsNone(learning.calibrate_over(0.6, "points"))
+        self.assertIsNone(learning.calibration_status()["trained_at"])
+        self.assertIn("Rebuilding the calibration", learning.calibration_status()["message"])
+        status = learning.retrain()
+        self.assertEqual(status["version"], 2)
+        self.assertEqual(Learning(self.store, clock=self.clock).calibration_status(), status)
 
     def test_background_retrain(self):
         worker = self.learning.retrain_in_background()

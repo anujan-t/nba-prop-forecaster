@@ -1,0 +1,154 @@
+/* COURTSIDE newsroom: headlines, the injury report, team scouting reports and roster moves. */
+
+.news-panel .section-heading { margin-bottom: 10px; }
+.news-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
+.news-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 16px; }
+.news-kinds { flex-wrap: wrap; }
+.news-kinds > button { white-space: nowrap; }
+.news-select { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13.5px; font-weight: 700; white-space: nowrap; }
+.news-select select { min-height: 38px; padding: 6px 10px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; font-weight: 600; }
+.news-check { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-2); font-size: 13.5px; font-weight: 700; }
+.news-search { flex: 1 1 280px; max-width: 420px; }
+.news-footnote { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.news-footnote.emphasis { padding: 8px 12px; border-left: 3px solid var(--warning); border-radius: 0 8px 8px 0; background: var(--warning-soft); color: var(--ink-2); }
+
+/* Headlines */
+.news-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.news-list.compact { grid-template-columns: minmax(0, 1fr); }
+.news-card { display: flex; flex-direction: column; min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); }
+.news-card.kind-injury { border-left: 4px solid var(--danger); }
+.news-card.kind-transaction { border-left: 4px solid var(--royal); }
+.news-card.kind-coaching { border-left: 4px solid var(--orange); }
+.news-image { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: var(--surface-3); }
+.news-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.news-video { position: absolute; bottom: 8px; left: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 999px; background: rgba(11, 17, 32, .82); color: #F4EFE7; font-size: 12px; font-weight: 700; }
+.news-body { display: flex; flex: 1; flex-direction: column; gap: 8px; padding: 14px 16px 16px; }
+.news-kicker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--muted); font-size: 12.5px; }
+.news-byline { color: var(--ink-2); font-weight: 600; }
+.news-card h3 { font-size: 19px; line-height: 1.25; letter-spacing: .01em; }
+.news-card h3 a { color: var(--ink); text-decoration: none; }
+.news-card h3 a:hover { color: var(--orange-ink); text-decoration: underline; text-underline-offset: 3px; }
+.news-card h3 a > svg { margin-left: 6px; color: var(--muted); vertical-align: -1px; }
+.news-card p { color: var(--ink-2); font-size: 14px; line-height: 1.5; }
+.news-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 4px; }
+.news-card.lead { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); margin-bottom: 16px; }
+.news-card.lead .news-image { aspect-ratio: auto; min-height: 240px; }
+.news-card.lead .news-body { justify-content: center; padding: 22px 26px; }
+.news-card.lead h3 { font-size: clamp(22px, 2.2vw, 30px); }
+.news-card.lead p { font-size: 15.5px; }
+
+.kind-pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; background: var(--surface-3); color: var(--ink-2); font-family: var(--font-display); font-size: 12.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.kind-pill.kind-injury { background: var(--danger-soft); color: var(--danger); }
+.kind-pill.kind-transaction { background: var(--royal-soft); color: var(--royal); }
+.kind-pill.kind-coaching { background: var(--orange-soft); color: var(--orange-ink); }
+.kind-pill.kind-betting { background: var(--warning-soft); color: var(--warning); }
+.kind-pill.kind-game { background: var(--success-soft); color: var(--success); }
+
+.team-chip, .athlete-chip { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 12.5px; font-weight: 700; text-decoration: none; }
+.team-chip { font-family: var(--font-score); letter-spacing: .04em; }
+.team-chip:hover, .player-link:hover .athlete-chip { border-color: var(--orange); color: var(--orange-ink); }
+.athlete-chip.muted { color: var(--ink-2); font-weight: 600; }
+.player-link { color: var(--royal); font-weight: 700; text-decoration: none; }
+.player-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Injury report */
+.injury-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.injury-count { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-height: 76px; padding: 12px 14px; border: 1.5px solid var(--line); border-radius: 14px; background: var(--surface-2); color: var(--ink); text-align: left; }
+.injury-count:hover { border-color: var(--orange); }
+.injury-count.selected { border-color: var(--orange); box-shadow: inset 0 0 0 1.5px var(--orange); background: var(--surface); }
+.injury-count strong { font-family: var(--font-score); font-size: 28px; line-height: 1; font-variant-numeric: tabular-nums; }
+.injury-count span { color: var(--ink-2); font-size: 13px; font-weight: 700; }
+.injury-count.count-out strong { color: var(--danger); }
+.injury-count.count-uncertain strong { color: var(--warning); }
+.injury-teams { display: flex; flex-direction: column; gap: 18px; }
+.injury-team-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
+.injury-team-head h3 { font-size: 20px; letter-spacing: .03em; }
+.injury-team-head .text-button { margin-left: auto; }
+.injury-table tbody th[scope="row"], .metric-table tbody th[scope="row"] { min-width: 170px; background: transparent; color: var(--ink); font-family: var(--font-body); font-size: 14px; font-weight: 700; letter-spacing: 0; text-transform: none; }
+.injury-position { margin-left: 8px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.injury-table td.injury-note { min-width: 280px; max-width: 560px; color: var(--ink-2); font-size: 13.5px; line-height: 1.45; white-space: normal; }
+.injury-note small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.injury-note details { margin-top: 4px; }
+.injury-note summary { color: var(--royal); font-weight: 700; cursor: pointer; }
+.injury-note details p { margin-top: 4px; }
+
+.injury-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; background: var(--warning-soft); color: var(--warning); font-size: 12.5px; white-space: nowrap; }
+.injury-badge strong { font-family: var(--font-display); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+.injury-badge > span { color: var(--ink-2); font-weight: 600; }
+.injury-badge.status-out, .injury-badge.status-suspended { background: var(--danger-soft); color: var(--danger); }
+.injury-badge.status-probable { background: var(--success-soft); color: var(--success); }
+
+/* Teams */
+.team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.team-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 14px; border: 1.5px solid var(--line); border-radius: 14px; background: var(--surface-2); color: var(--ink); text-decoration: none; transition: border-color .15s, transform .15s var(--ease-out); }
+.team-card:hover { border-color: var(--orange); transform: translateY(-1px); }
+.team-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.team-code { display: grid; flex-shrink: 0; place-items: center; width: 46px; height: 46px; border-radius: 12px; background: var(--band); color: var(--band-accent); font-family: var(--font-score); font-size: 15px; font-weight: 700; letter-spacing: .04em; }
+.team-code.large { width: 74px; height: 74px; border-radius: 18px; font-size: 22px; }
+.team-card-name { display: flex; flex-direction: column; min-width: 0; font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: .02em; line-height: 1.15; }
+.team-card-name small { overflow: hidden; color: var(--ink-2); font-family: var(--font-body); font-size: 12.5px; font-weight: 600; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
+.team-card-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.team-card-stats > span { display: flex; flex-direction: column; align-items: center; padding: 6px 4px; border-radius: 10px; background: var(--surface); }
+.team-card-stats small { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.team-card-stats strong { font-family: var(--font-score); font-size: 15px; }
+.style-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.style-tags > span { padding: 2px 8px; border-radius: 999px; background: var(--royal-soft); color: var(--royal); font-size: 12px; font-weight: 700; }
+.style-tags.large { margin-bottom: 14px; }
+.style-tags.large > span { padding: 4px 11px; font-size: 13px; }
+.team-card-injuries { display: inline-flex; align-items: center; gap: 5px; color: var(--danger); font-size: 12.5px; font-weight: 700; }
+
+.team-detail { display: flex; flex-direction: column; gap: 20px; }
+.team-detail .section-heading { flex-wrap: wrap; }
+.team-detail .card + .card { margin-top: 0; }
+.back-link { align-self: flex-start; }
+.team-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 20px; }
+.team-hero > div { flex: 1 1 260px; min-width: 0; }
+.team-hero h2 { font-size: clamp(28px, 3vw, 40px); }
+.team-hero p { margin-top: 4px; color: var(--ink-2); font-size: 15px; }
+.team-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.style-summary { margin-bottom: 12px; color: var(--ink-2); font-size: 15px; line-height: 1.5; }
+.metric-table td.mono { font-family: var(--font-score); font-variant-numeric: tabular-nums; }
+.rank-cell { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.rank-bar { display: inline-block; width: 80px; height: 6px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.rank-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--orange); }
+.play-types { display: flex; flex-direction: column; gap: 10px; margin: 0 0 12px; padding: 0; list-style: none; }
+.play-types > li { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(80px, 1.3fr) minmax(120px, auto); align-items: center; gap: 12px; }
+.play-label { display: flex; flex-direction: column; font-weight: 700; font-size: 14px; }
+.play-label small, .play-value small { color: var(--muted); font-size: 12px; font-weight: 600; }
+.play-bar { height: 10px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.play-bar > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--royal), var(--orange)); }
+.play-value { display: flex; flex-direction: column; align-items: flex-end; text-align: right; }
+.play-value strong { font-family: var(--font-score); font-size: 15px; }
+.staff .head-coach { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; padding: 12px 14px; border-left: 4px solid var(--orange); border-radius: 0 12px 12px 0; background: var(--surface-2); }
+.staff .head-coach strong { font-family: var(--font-display); font-size: 24px; letter-spacing: .02em; }
+.staff ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 14px; margin: 0 0 12px; padding: 0; list-style: none; }
+.staff li { display: flex; flex-direction: column; font-weight: 600; }
+.staff li small { color: var(--muted); font-size: 12px; }
+
+/* Roster moves */
+.moves-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.moves-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
+.moves-list > li:last-child { border-bottom: 0; }
+.moves-list time { min-width: 58px; color: var(--muted); font-family: var(--font-score); font-size: 13px; }
+
+/* Players: injury strip under the league selector */
+.player-news { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: -6px 0 18px; padding: 12px 16px; border: 1px solid var(--line); border-left: 4px solid var(--warning); border-radius: 12px; background: var(--surface); font-size: 14px; }
+.player-news.status-out, .player-news.status-suspended { border-left-color: var(--danger); }
+.player-news.clear { border-left-color: var(--success); }
+.player-news > p { flex: 1 1 320px; margin: 0; color: var(--ink-2); line-height: 1.45; }
+.player-news > p strong { color: var(--ink); }
+.player-news .text-button { white-space: nowrap; }
+
+@media (max-width: 1000px) {
+  .team-detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .news-card.lead { grid-template-columns: minmax(0, 1fr); }
+  .news-card.lead .news-image { min-height: 0; aspect-ratio: 16 / 9; }
+}
+@media (max-width: 640px) {
+  .injury-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .news-list { grid-template-columns: minmax(0, 1fr); }
+  .play-types > li { grid-template-columns: minmax(0, 1fr) auto; }
+  .play-bar { grid-column: 1 / -1; grid-row: 2; }
+  .staff ul { grid-template-columns: minmax(0, 1fr); }
+  .injury-team-head .text-button { margin-left: 0; }
+}

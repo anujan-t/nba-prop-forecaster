@@ -10,7 +10,7 @@ export interface SlipApplication { applied: boolean; hash: string | null; notes:
 export interface ChatBindings {
   /** The slip right now, sent with every message. */
   getSlip: () => ChatSlip;
-  /** The applied Forecast lab forecast, if any. */
+  /** The applied forecast on Players › Props, if any. */
   getFocus: () => ChatFocus | null;
   /** Applies a reply's slip, unless the slip changed since `sent` went out. */
   applySlip: (slip: { legs: unknown[]; book_odds: unknown }, sent: ChatSlip) => SlipApplication;
@@ -30,12 +30,15 @@ export interface ChatState {
   feedbackError: { messageId: string; message: string } | null;
   reply: ChatEvent | null;
   slipEvent: ChatEvent | null;
+  /** The unsent composer text, shared by the drawer and the Coach page. */
+  draft: string;
+  setDraft: (text: string) => void;
   send: (text: string) => boolean;
   retry: () => void;
   stop: () => void;
   reset: () => void;
   rate: (messageId: string, rating: 1 | -1) => void;
-  refreshStatus: (force?: boolean) => void;
+  refreshStatus: (force?: boolean) => Promise<void>;
 }
 
 interface InFlight { controller: AbortController; reason: 'stop' | 'reset' | null }
@@ -51,13 +54,14 @@ export function useChat(bindings: ChatBindings): ChatState {
   const [feedbackError, setFeedbackError] = useState<ChatState['feedbackError']>(null);
   const [reply, setReply] = useState<ChatEvent | null>(null);
   const [slipEvent, setSlipEvent] = useState<ChatEvent | null>(null);
+  const [draft, setDraft] = useState('');
   const bindingsRef = useRef(bindings);
   bindingsRef.current = bindings;
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
   const inFlight = useRef<InFlight | null>(null);
   const fromStorage = useRef(false);
-  const statusState = useRef({ loading: false, at: 0 });
+  const statusState = useRef<{ request: Promise<void> | null; at: number }>({ request: null, at: 0 });
   const ratingSequence = useRef(new Map<string, number>());
   const counter = useRef(0);
 
@@ -156,6 +160,7 @@ export function useChat(bindings: ChatBindings): ChatState {
     }
     setFailure(null);
     setFeedbackError(null);
+    setDraft('');
     const next = newConversation();
     conversationRef.current = next;
     setConversation(next);
@@ -181,15 +186,17 @@ export function useChat(bindings: ChatBindings): ChatState {
     });
   }, []);
 
-  const refreshStatus = useCallback((force = false) => {
+  const refreshStatus = useCallback((force = false): Promise<void> => {
     const state = statusState.current;
-    if (state.loading || (!force && state.at && Date.now() - state.at < 60_000)) return;
-    state.loading = true;
-    api<AssistantStatus>('/api/assistant/status')
+    if (state.request) return state.request;
+    if (!force && state.at && Date.now() - state.at < 60_000) return Promise.resolve();
+    const request = api<AssistantStatus>('/api/assistant/status')
       .then(data => { setStatus(data); setStatusError(''); })
       .catch((reason: unknown) => setStatusError(messageOf(reason)))
-      .finally(() => { state.loading = false; state.at = Date.now(); });
+      .finally(() => { state.request = null; state.at = Date.now(); });
+    state.request = request;
+    return request;
   }, []);
 
-  return { conversation, pending, failure, status, statusError, feedbackError, reply, slipEvent, send, retry, stop, reset, rate, refreshStatus };
+  return { conversation, pending, failure, status, statusError, feedbackError, reply, slipEvent, draft, setDraft, send, retry, stop, reset, rate, refreshStatus };
 }

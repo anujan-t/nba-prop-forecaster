@@ -22,10 +22,12 @@ import numpy as np
 import pandas as pd
 from scipy.special import expit, logit
 
-from . import nlu
-from .data import STATS
-from .engine import MIN_TRAIN, american_probability, context_adjustment, fit_distribution, profit_per_unit
+from . import nlu, simulation
+from .data import BOX_COUNTS, STATS
+from .engine import (MIN_TRAIN, CountDistribution, american_probability, context_adjustment, fit_distribution,
+                     profit_per_unit, resolve_model, simulation_supported)
 from .nlu import name_key
+from .stats import PROP_STATS, STAT_DEFS, game_value, label as stat_label, validate_line as validate_market_line, with_stats
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +39,20 @@ MAX_NOTE = 200
 MAX_FEEDBACK_NOTE = 1000
 ALIAS_SOURCES = ("taught", "clarified")
 # Words the assistant reads as stats (including ones it can't forecast); they can't double as nicknames.
-STAT_TERMS = frozenset(name_key(word) for word in (*STATS, *nlu.STAT_LOOKUP, *getattr(nlu, "UNSUPPORTED", {})))
+STAT_TERMS = frozenset(name_key(word) for word in (*STATS, *PROP_STATS, *nlu.STAT_LOOKUP, *getattr(nlu, "UNSUPPORTED", {})))
 TURN_JSON_FIELDS = ("intents", "entities", "actions", "engine", "slip_before", "slip_after", "tool_calls")
 SIDES = ("over", "under")
-WINDOW = 30  # trailing games behind each walk-forward forecast
+WINDOW = 60  # trailing games behind each walk-forward forecast (the default lookback)
 LINE_STEPS = (-2, -1, 0, 1, 2)
 CLIP = 1e-4
 RIDGE = 10.0
+STAT_RIDGE = 25.0  # each market's own correction is shrunk toward the shared one
 HOLDOUT_SHARE = 4  # the newest quarter of graded predictions is held out
 MIN_HOLDOUT = 200
 MIN_SAMPLES = MIN_HOLDOUT * HOLDOUT_SHARE
+STAT_MIN_HOLDOUT = 100  # a market needs this many held-out predictions (and as many to train on) for its own test
 MIN_GAIN = 0.001
+CALIBRATION_VERSION = 2  # 2: per-market corrections learned on the game simulator's forecasts
 BOX_SCORE_HOUR = 6  # Eastern hour after which a missing box score from the previous day means "did not play"
 
 SCHEMA = (
@@ -248,16 +253,16 @@ def recalibrate(p: Any, intercept: float, slope: float) -> Any:
 
 
 def fit_recalibration(p: Any, outcomes: Any, penalty: float = RIDGE, iterations: int = 50,
-                      tolerance: float = 1e-10) -> tuple[float, float]:
-    """Penalized maximum likelihood for logit(q) = a + b·logit(p) with ridge penalty λ·(a² + (b − 1)²).
+                      tolerance: float = 1e-10, prior: tuple[float, float] = (0.0, 1.0)) -> tuple[float, float]:
+    """Penalized maximum likelihood for logit(q) = a + b·logit(p) with ridge penalty λ·((a − a₀)² + (b − b₀)²).
 
-    Newton's method from the identity map (a, b) = (0, 1); the penalty keeps the fit near the identity when
-    graded predictions are scarce and makes the objective strictly convex.
+    Newton's method from the prior map (a₀, b₀), by default the identity (0, 1); the penalty keeps the fit near the
+    prior when graded predictions are scarce and makes the objective strictly convex.
     """
     x = _logit(p)
     y = np.asarray(outcomes, dtype=float)
     design = np.column_stack([np.ones_like(x), x])
-    prior = np.array([0.0, 1.0])
+    prior = np.array([float(prior[0]), float(prior[1])])
     theta = prior.copy()
 
     def objective(candidate: np.ndarray) -> float:
@@ -320,10 +325,10 @@ def _rounded(value: float | None) -> float | None:
 def untrained_status() -> dict:
     return {
         "active": False, "trained_at": None, "samples": 0, "ledger_samples": 0, "players": 0,
-        "intercept": None, "slope": None, "holdout": None, "curve": [],
+        "intercept": None, "slope": None, "holdout": None, "curve": [], "stats": [],
         "message": ("Not trained yet. The calibration learns from graded predictions: walk-forward forecasts on saved NBA "
-                    "game logs plus your settled tracked legs. It switches on only if it beats the raw model on the most "
-                    "recent games."),
+                    "game logs plus your settled tracked legs, separately for every market. A correction switches on only "
+                    "if it beats the raw model on the most recent games."),
     }
 
 
@@ -345,28 +350,99 @@ def _direction(intercept: float, slope: float) -> str:
     return f" {sentence[0].upper()}{sentence[1:]}."
 
 
-def fit_calibration(samples: pd.DataFrame, trained_at: str | None = None) -> tuple[dict, tuple[bool, float | None, float | None]]:
-    """CalibrationStatus plus the (active, intercept, slope) to apply, from graded over/under predictions.
+def _holdout_scores(raw: np.ndarray, y: np.ndarray, intercept: float, slope: float) -> dict:
+    log_loss, brier = _scores(raw, y, intercept, slope)
+    return {"log_loss": round(log_loss, 6), "brier": round(brier, 6)}
 
-    ``samples`` has columns date (YYYY-MM-DD), player_id, p (raw over probability), outcome (1 when the over won)
-    and source ('walk_forward' or 'ledger'). The newest quarter is a holdout: the correction is switched on only if,
-    fitted on the older three quarters, it lowers holdout log loss by more than 0.001 without raising the Brier score.
-    It is then refitted on every sample.
+
+def _stat_calibration(stat: str, group: pd.DataFrame, training: np.ndarray, pooled_train: tuple[float, float] | None,
+                      pooled: tuple[bool, float | None, float | None]) -> tuple[dict, tuple[bool, float | None, float | None]]:
+    """One market's own correction, tested on its share of the newest predictions against the raw model and the
+    shared correction. ``training`` marks rows outside the global holdout (rows are in date order)."""
+    name = stat_label(stat)
+    raw = group["p"].to_numpy(dtype=float)
+    y = group["outcome"].to_numpy(dtype=float)
+    count = len(group)
+    ledger = int((group["source"] == "ledger").sum())
+    pooled_active, pooled_intercept, pooled_slope = pooled
+    held = int((~training).sum())
+    entry = {"stat": stat, "label": name, "samples": count, "ledger_samples": ledger, "choice": "none", "active": False,
+             "intercept": None, "slope": None, "holdout": None, "curve": [], "message": ""}
+
+    def shared(reason: str) -> tuple[dict, tuple[bool, float | None, float | None]]:
+        if pooled_active:
+            entry.update(choice="shared", active=True, intercept=_rounded(pooled_intercept), slope=_rounded(pooled_slope),
+                         curve=calibration_curve(raw, y, pooled_intercept, pooled_slope),
+                         message=f"{reason} Uses the shared correction, which beat the raw model across every market.")
+            return entry, (True, pooled_intercept, pooled_slope)
+        entry.update(curve=calibration_curve(raw, y, None, None), message=f"{reason} Keeps the raw model.")
+        return entry, (False, None, None)
+
+    if pooled_train is None or held < STAT_MIN_HOLDOUT or count - held < STAT_MIN_HOLDOUT:
+        return shared(f"{_plural(count, 'graded prediction')}: too few for a separate {name.lower()} test "
+                      f"(needs {STAT_MIN_HOLDOUT:,} recent and {STAT_MIN_HOLDOUT:,} older).")
+    own = fit_recalibration(raw[training], y[training], penalty=STAT_RIDGE, prior=pooled_train)
+    test_raw, test_y = raw[~training], y[~training]
+    scores = {"raw": _holdout_scores(test_raw, test_y, 0.0, 1.0), "shared": _holdout_scores(test_raw, test_y, *pooled_train),
+              "own": _holdout_scores(test_raw, test_y, *own)}
+    entry["holdout"] = {"samples": held, **{f"{key}_{metric}": value[metric] for key, value in scores.items()
+                                            for metric in ("log_loss", "brier")}}
+    base = scores["raw"]
+    passing = [key for key in ("own", "shared") if scores[key]["log_loss"] < base["log_loss"] - MIN_GAIN
+               and scores[key]["brier"] <= base["brier"]]
+    choice = min(passing, key=lambda key: scores[key]["log_loss"]) if passing else "none"
+    if choice == "own":
+        prior = (pooled_intercept, pooled_slope) if pooled_intercept is not None and pooled_slope is not None else pooled_train
+        intercept, slope = fit_recalibration(raw, y, penalty=STAT_RIDGE, prior=prior)
+        entry.update(choice="own", active=True, intercept=_rounded(intercept), slope=_rounded(slope),
+                     curve=calibration_curve(raw, y, intercept, slope),
+                     message=(f"Own {name.lower()} correction from {_plural(count, 'graded prediction')}: on the newest {held:,} "
+                              f"it lowered log loss from {base['log_loss']:.3f} to {scores['own']['log_loss']:.3f}"
+                              + (f" (shared correction: {scores['shared']['log_loss']:.3f})." if pooled_active else ".")
+                              + _direction(intercept, slope)))
+        return entry, (True, intercept, slope)
+    if choice == "shared":
+        entry.update(choice="shared", active=True, intercept=_rounded(pooled_intercept), slope=_rounded(pooled_slope),
+                     curve=calibration_curve(raw, y, pooled_intercept, pooled_slope),
+                     message=(f"On the newest {held:,} {name.lower()} predictions the shared correction did best (log loss "
+                              f"{base['log_loss']:.3f} raw, {scores['shared']['log_loss']:.3f} shared, {scores['own']['log_loss']:.3f} own), "
+                              "so it uses the shared one."))
+        return entry, (True, pooled_intercept, pooled_slope)
+    entry.update(curve=calibration_curve(raw, y, None, None),
+                 message=(f"Raw {name.lower()} forecasts were already as well calibrated on the newest {held:,} (log loss "
+                          f"{base['log_loss']:.3f} raw, {scores['own']['log_loss']:.3f} own, {scores['shared']['log_loss']:.3f} shared), "
+                          "so no correction is applied."))
+    return entry, (False, None, None)
+
+
+def fit_calibration(samples: pd.DataFrame, trained_at: str | None = None) -> tuple[dict, tuple]:
+    """CalibrationStatus plus the parameters to apply, from graded over/under predictions.
+
+    ``samples`` has columns date (YYYY-MM-DD), player_id, stat, p (raw over probability), outcome (1 when the over won)
+    and source ('walk_forward' or 'ledger'). The newest quarter is a holdout: the shared correction is switched on only
+    if, fitted on the older three quarters, it lowers holdout log loss by more than 0.001 without raising the Brier
+    score. Each market then gets its own correction (shrunk toward the shared one) and keeps whichever of raw, shared
+    or its own did best on its part of the holdout. Every active correction is refitted on all its samples.
+
+    Returns (status, (active, intercept, slope, per_stat)) where per_stat maps a market to (active, intercept, slope).
     """
     count = len(samples)
     ledger = int((samples["source"] == "ledger").sum()) if count else 0
     players = int(samples["player_id"].nunique()) if count else 0
     raw = np.zeros(0)
     y = np.zeros(0)
+    ordered = samples
     if count:
         order = np.argsort(samples["date"].astype(str).to_numpy(), kind="stable")
-        raw = samples["p"].to_numpy(dtype=float)[order]
-        y = samples["outcome"].to_numpy(dtype=float)[order]
+        ordered = samples.iloc[order].reset_index(drop=True)
+        raw = ordered["p"].to_numpy(dtype=float)
+        y = ordered["outcome"].to_numpy(dtype=float)
     held = count // HOLDOUT_SHARE
     holdout = None
     active = False
     intercept: float | None = None
     slope: float | None = None
+    pooled_train: tuple[float, float] | None = None
     if held < MIN_HOLDOUT:
         if count:
             intercept, slope = fit_recalibration(raw, y)
@@ -375,6 +451,7 @@ def fit_calibration(samples: pd.DataFrame, trained_at: str | None = None) -> tup
     else:
         cut = count - held
         intercept, slope = fit_recalibration(raw[:cut], y[:cut])
+        pooled_train = (intercept, slope)
         raw_log_loss, raw_brier = _scores(raw[cut:], y[cut:], 0.0, 1.0)
         calibrated_log_loss, calibrated_brier = _scores(raw[cut:], y[cut:], intercept, slope)
         active = calibrated_log_loss < raw_log_loss - MIN_GAIN and calibrated_brier <= raw_brier
@@ -395,12 +472,30 @@ def fit_calibration(samples: pd.DataFrame, trained_at: str | None = None) -> tup
         else:
             message = (f"The raw model is already as well calibrated on the most recent {held:,} graded predictions "
                        f"(log loss {raw_log_loss:.3f} raw vs {calibrated_log_loss:.3f} corrected), so no correction is applied.")
+    per_stat: dict[str, tuple[bool, float | None, float | None]] = {}
+    entries = []
+    if count and "stat" in ordered:
+        training = np.arange(count) < count - held if held >= MIN_HOLDOUT else np.ones(count, dtype=bool)
+        order_of = {stat: index for index, stat in enumerate(PROP_STATS)}
+        for stat in sorted(ordered["stat"].unique(), key=lambda value: order_of.get(value, len(order_of))):
+            if stat not in STAT_DEFS:
+                continue
+            mask = (ordered["stat"] == stat).to_numpy()
+            entry, params = _stat_calibration(stat, ordered[mask], training[mask], pooled_train, (bool(active), intercept, slope))
+            entries.append(entry)
+            per_stat[stat] = params
+    if entries:
+        own = sum(entry["choice"] == "own" for entry in entries)
+        shared = sum(entry["choice"] == "shared" for entry in entries)
+        message += (f" Calibrated per market: {own} of {len(entries)} use their own correction, {shared} the shared one and "
+                    f"{len(entries) - own - shared} the raw model.")
     status = {
         "active": bool(active), "trained_at": trained_at, "samples": count, "ledger_samples": ledger, "players": players,
         "intercept": _rounded(intercept), "slope": _rounded(slope), "holdout": holdout,
-        "curve": calibration_curve(raw, y, intercept, slope), "message": message,
+        "curve": calibration_curve(raw, y, intercept, slope), "message": message, "stats": entries,
+        "version": CALIBRATION_VERSION,
     }
-    return status, (bool(active), intercept, slope)
+    return status, (bool(active), intercept, slope, per_stat)
 
 
 def nba_game_logs(store) -> pd.DataFrame:
@@ -413,7 +508,8 @@ def nba_game_logs(store) -> pd.DataFrame:
             frame, _ = store.load(info["id"])
         except (KeyError, ValueError):
             continue
-        frames.append(frame.loc[:, ["date", "player_id", "opponent", "minutes", *STATS]])
+        frames.append(frame.loc[:, ["date", "player_id", "opponent", "minutes", *STATS,
+                                    *[column for column in BOX_COUNTS if column in frame.columns]]])
     if not frames:
         return pd.DataFrame(columns=["date", "player_id", "opponent", "minutes", *STATS, "rest_days"])
     combined = pd.concat(frames, ignore_index=True)
@@ -427,37 +523,60 @@ def nba_game_logs(store) -> pd.DataFrame:
     return combined
 
 
-def walk_forward_samples(frame: pd.DataFrame) -> pd.DataFrame:
-    """Walk-forward over probabilities for every player, stat and target game after the first 15.
+def _lines(values: np.ndarray, milestone: bool) -> list[float]:
+    """The trailing median's half point and ±1, ±2 steps of half a standard deviation (at least one); 0.5 for yes/no."""
+    if milestone:
+        return [0.5]
+    base = math.floor(float(np.median(values))) + 0.5
+    step = max(1, int(round(float(np.std(values, ddof=1)) / 2)))
+    return [line for line in (base + offset * step for offset in LINE_STEPS) if 0.5 <= line <= 200]
+
+
+def walk_forward_samples(frame: pd.DataFrame, simulations: int = simulation.EVALUATION_SIMULATIONS) -> pd.DataFrame:
+    """Walk-forward over probabilities for every player, market and target game after the first 15, from Auto.
 
     Each forecast uses the player's previous 30 games, the target game's rest days and opponent (schedule fields)
-    and never the target game's minutes or box score. Lines sit at the trailing median's half point and ±1, ±2 steps
-    of half a standard deviation (at least one), so probabilities spread across the range.
+    and never the target game's minutes or box score. One simulation per target game prices every simulated market.
+    Lines sit at the trailing median's half point and ±1, ±2 steps of half a standard deviation (at least one), so
+    probabilities spread across the range; yes/no markets use 0.5.
     """
     records: dict[str, list] = {key: [] for key in ("date", "player_id", "stat", "line", "p", "outcome")}
     if len(frame):
-        games_all = frame.loc[:, ["date", "player_id", "opponent", "minutes", "rest_days", *STATS]]
-        for player_id, games in games_all.groupby("player_id", sort=True):
+        for player_id, games in frame.groupby("player_id", sort=True):
             games = games.sort_values("date", kind="stable").reset_index(drop=True)
+            markets = [stat for stat in PROP_STATS if all(column in games.columns for column in STAT_DEFS[stat].columns)]
+            games = with_stats(games, markets)
             dates = games["date"].astype(str).tolist()
             rest = games["rest_days"].astype(int).tolist()
             opponents = games["opponent"].astype(str).tolist()
-            actual = {stat: games[stat].to_numpy(dtype=float) for stat in STATS}
             for index in range(MIN_TRAIN, len(games)):
-                history = games.iloc[max(0, index - WINDOW):index]
-                for stat in STATS:
-                    try:
-                        factor = context_adjustment(history, stat, None, rest[index], opponents[index], True)[0]
-                        fitted = fit_distribution(history, stat, "auto", factor)
-                    except (ValueError, ZeroDivisionError):
+                history_all = games.iloc[max(0, index - WINDOW):index]
+                simulated = None
+                for stat in markets:
+                    actual = games.at[index, stat]
+                    if pd.isna(actual):
                         continue
-                    values = history[stat].to_numpy(dtype=float)
-                    base = math.floor(float(np.median(values))) + 0.5
-                    step = max(1, int(round(float(np.std(values, ddof=1)) / 2)))
-                    for offset in LINE_STEPS:
-                        line = base + offset * step
-                        if line < 0.5 or line > 200:
-                            continue
+                    history = history_all[history_all[stat].notna()]
+                    if len(history) < MIN_TRAIN:
+                        continue
+                    spec = STAT_DEFS[stat]
+                    try:
+                        model = resolve_model(history, stat, "auto")
+                        if model == "simulation":
+                            if simulated is None or len(history) != len(history_all):
+                                game_model = simulation.fit_game_model(history, None, rest[index], opponents[index], True)
+                                draws = simulation.simulate(game_model, simulations, simulation.SEED + index)
+                                if len(history) == len(history_all):
+                                    simulated = draws
+                            else:
+                                draws = simulated
+                            fitted = CountDistribution.from_draws(draws.market(stat))
+                        else:
+                            factor = 1.0 if spec.milestone else context_adjustment(history, stat, None, rest[index], opponents[index], True)[0]
+                            fitted = fit_distribution(history, stat, model, factor)
+                    except (ValueError, ZeroDivisionError, np.linalg.LinAlgError):
+                        continue
+                    for line in _lines(history[stat].to_numpy(dtype=float), spec.milestone):
                         over, under, _ = fitted.probabilities(line)
                         total = over + under
                         if total < 1e-9:
@@ -470,7 +589,7 @@ def walk_forward_samples(frame: pd.DataFrame) -> pd.DataFrame:
                         records["stat"].append(stat)
                         records["line"].append(line)
                         records["p"].append(min(1.0, max(0.0, p)))
-                        records["outcome"].append(int(actual[stat][index] > line))
+                        records["outcome"].append(int(float(actual) > line))
     samples = pd.DataFrame(records)
     samples["source"] = "walk_forward"
     return samples
@@ -527,6 +646,7 @@ class Learning:
         self._worker: threading.Thread | None = None
         self._calibration = untrained_status()
         self._params: tuple[bool, float | None, float | None] = (False, None, None)
+        self._stat_params: dict[str, tuple[bool, float | None, float | None]] = {}
         with self._lock, store.connect() as db:
             for statement in SCHEMA:
                 db.execute(statement)
@@ -534,10 +654,27 @@ class Learning:
             row = db.execute("SELECT active, intercept, slope, status FROM learning_calibration WHERE id = 1").fetchone()
         if row is not None:
             try:
-                self._calibration = json.loads(row["status"])
-                self._params = (bool(row["active"]), row["intercept"], row["slope"])
-            except (TypeError, ValueError):
+                saved = json.loads(row["status"])
+                if saved.get("version") == CALIBRATION_VERSION:
+                    self._calibration = saved
+                    self._params = (bool(row["active"]), row["intercept"], row["slope"])
+                    self._stat_params = self._saved_stat_params(saved)
+                else:
+                    # Learned on an older model's forecasts: never apply it to the current model; a retrain rebuilds it.
+                    self._calibration = {**untrained_status(), "message": (
+                        "Rebuilding the calibration for the game simulator, separately for every market. It retrains in the "
+                        "background; until then forecasts are shown uncorrected.")}
+            except (TypeError, ValueError, KeyError):
                 logger.warning("Ignoring an unreadable saved calibration; it will be rebuilt on the next retrain.")
+
+    @staticmethod
+    def _saved_stat_params(status: dict) -> dict[str, tuple[bool, float | None, float | None]]:
+        """Per-market parameters exactly as fitted, from the saved status (rounded copies are for display only)."""
+        params = {}
+        for entry in status.get("stats") or []:
+            exact = entry.get("params") or [entry.get("active"), entry.get("intercept"), entry.get("slope")]
+            params[entry["stat"]] = (bool(exact[0]), exact[1], exact[2])
+        return params
 
     def _now(self) -> str:
         return _now_text(self._clock())
@@ -721,9 +858,13 @@ class Learning:
             label = leg.get("label") or {}
             player_id = str(request.get("player_id", "")).strip()
             stat, side = request.get("stat"), request.get("side")
-            if not player_id or stat not in STATS or side not in SIDES:
-                raise ValueError(f"Leg {number} needs a player, one of {', '.join(STATS)} and a side (over or under).")
+            if not player_id or stat not in PROP_STATS or side not in SIDES:
+                raise ValueError(f"Leg {number} needs a player, a supported market (such as points, threes or PRA) and a side (over or under).")
             line = _line(request.get("line"), f"Leg {number}")
+            try:
+                validate_market_line(stat, line)
+            except ValueError as exc:
+                raise ValueError(f"Leg {number}: {exc}") from exc
             if (player_id, stat) in seen:
                 raise ValueError(f"Leg {number} repeats a player and stat already on this slip.")
             seen.add((player_id, stat))
@@ -826,11 +967,11 @@ class Learning:
                             updates.append(("void", None, settled_at, leg["bet_id"], leg["position"]))
                         continue
                     try:
-                        actual = float(game[leg["stat"]])
-                        if not math.isfinite(actual):
+                        actual = game_value(game, leg["stat"])
+                        if actual is None or not math.isfinite(actual):
                             raise ValueError
                     except (KeyError, TypeError, ValueError):
-                        warnings.append(f"Could not read {name}'s {leg['stat']} on {leg['event_date']}; {_legs_stay(1)} pending.")
+                        warnings.append(f"Could not read {name}'s {stat_label(leg['stat']).lower()} on {leg['event_date']}; {_legs_stay(1)} pending.")
                         continue
                     updates.append((grade_leg(int(actual), float(leg["line"]), leg["side"]), int(actual), settled_at,
                                     leg["bet_id"], leg["position"]))
@@ -914,13 +1055,15 @@ class Learning:
                 parts = [walk_forward_samples(nba_game_logs(self.store)), self.ledger_samples()]
                 samples = pd.concat([part for part in parts if len(part)], ignore_index=True) if any(len(part) for part in parts) else parts[0]
                 status, params = fit_calibration(samples, self._now())
-                active, intercept, slope = params
+                active, intercept, slope, per_stat = params
+                for entry in status.get("stats", []):
+                    entry["params"] = list(per_stat.get(entry["stat"], (False, None, None)))
                 with self._lock, self.store.connect() as db:
                     db.execute("""INSERT INTO learning_calibration (id, trained_at, active, intercept, slope, status)
                         VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET trained_at = excluded.trained_at,
                         active = excluded.active, intercept = excluded.intercept, slope = excluded.slope,
                         status = excluded.status""", (status["trained_at"], int(active), intercept, slope, _dump(status)))
-                    self._calibration, self._params = status, params
+                    self._calibration, self._params, self._stat_params = status, (active, intercept, slope), dict(per_stat)
                 return copy.deepcopy(status)
             finally:
                 self._training = False
@@ -949,12 +1092,14 @@ class Learning:
         return self._training
 
     def calibrate_over(self, p_over: float, stat: str | None = None) -> float | None:
-        """Recalibrated chance of the over, strictly inside (0, 1); None while the correction is off or when p is
-        not a number. p is clipped into [0, 1] (and to [1e-4, 1 − 1e-4] before the logit). Pooled across stats.
+        """Recalibrated chance of the over, strictly inside (0, 1); None while no correction is on for this market or
+        when p is not a number. p is clipped into [0, 1] (and to [1e-4, 1 − 1e-4] before the logit).
 
+        Each market uses its own learned correction (or the shared one when that tested better for it); a market with
+        no graded predictions yet falls back to the shared correction. Without a market, the shared one is used.
         For an under leg use 1 − calibrate_over(1 − p_under) (half-point lines, where over + under = 1).
         """
-        active, intercept, slope = self._params
+        active, intercept, slope = self._stat_params.get(stat, self._params) if stat is not None else self._params
         if not active or intercept is None or slope is None:
             return None
         try:
@@ -967,6 +1112,10 @@ class Learning:
         return float(min(1 - CLIP, max(CLIP, q)))
 
     calibrate = calibrate_over
+
+    def calibration_for(self, stat: str) -> dict | None:
+        """The calibration entry for one market (samples, choice, held-out scores), or None before training."""
+        return next((copy.deepcopy(entry) for entry in self._calibration.get("stats") or [] if entry.get("stat") == stat), None)
 
     def calibration_status(self) -> dict:
         return copy.deepcopy(self._calibration)

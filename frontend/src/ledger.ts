@@ -54,3 +54,23 @@ export function legsDetail(record: TrackRecord): string {
     ? `${record.legs_won} of ${record.legs_graded} graded legs won · model expected ${record.expected_legs_won.toFixed(1)}`
     : 'No graded legs yet';
 }
+
+export function timestampLabel(value: string | null): string {
+  if (!value) return 'Never';
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * Decides, while a row is still on screen, where focus goes once it is removed: the neighbouring row, or a
+ * fallback such as the section heading. Call the returned function after the removal succeeds.
+ */
+export function focusAfterRemoval(container: HTMLElement | null, attribute: string, removed: string, fallback: HTMLElement | null, pick: (item: HTMLElement) => HTMLElement | null): () => void {
+  const items = container ? Array.from(container.querySelectorAll<HTMLElement>(`[${attribute}]`)) : [];
+  const index = items.findIndex(item => item.getAttribute(attribute) === removed);
+  const next = index < 0 ? undefined : items[index + 1] ?? items[index - 1];
+  return () => window.requestAnimationFrame(() => {
+    const target = next && document.contains(next) ? pick(next) : null;
+    (target ?? fallback)?.focus();
+  });
+}

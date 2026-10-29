@@ -141,34 +141,8 @@
 .intel-provider-warnings li { color: var(--ink-2); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
 .intel-provider-warnings li + li { margin-top: 4px; }
 
-.intel-tabs { display: flex; gap: 6px; margin: 0 0 22px; padding: 0; border-bottom: 2px solid var(--floor-line); }
-.intel-tabs > button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  margin-bottom: -2px;
-  padding: 14px 20px 12px;
-  border: 0;
-  border-bottom: 3px solid transparent;
-  border-radius: 10px 10px 0 0;
-  background: none;
-  color: var(--floor-ink-2);
-  font-family: var(--font-display);
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.intel-tabs > button:hover { background: var(--surface); color: var(--ink); }
-.intel-tabs > button.intel-tab-active { border-bottom-color: var(--orange); background: var(--surface); color: var(--ink); }
-.intel-tabs > button > span { display: inline-grid; place-items: center; min-width: 24px; height: 22px; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--ink-2); font-family: var(--font-score); font-size: 12px; letter-spacing: 0; }
-.intel-tabs > .intel-tab-active > span { background: var(--orange); color: var(--on-orange); }
-.intel-tab-panel { min-width: 0; outline-offset: 4px; }
-.intel-tab-panel:focus-visible { border-radius: 12px; }
 .intel-overview-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); align-items: start; gap: 20px; margin-bottom: 20px; }
-.intel-overview-performance { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-.intel-overview-performance > .card + .card, .intel-overview-grid > .card + .card { margin-top: 0; }
+.intel-overview-grid > .card + .card { margin-top: 0; }
 .intel-workspace .section-heading { align-items: flex-start; gap: 14px; }
 .intel-workspace .section-heading h2 { font-size: 23px; }
 .intel-inline-loading { display: flex; margin: 0 0 18px; color: var(--orange-ink); font-size: 14px; font-weight: 600; line-height: 1.6; }
@@ -343,8 +317,6 @@
   .intel-profile-highlights strong { font-size: 16px; }
   .intel-status-grid { gap: 8px; margin: 12px 0 18px; }
   .intel-section-status { flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 6px; padding: 11px 12px; }
-  .intel-tabs { gap: 4px; margin-bottom: 20px; }
-  .intel-tabs > button { flex: 1; padding: 13px 10px 11px; font-size: 16px; }
   .intel-averages-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .intel-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .intel-log-toolbar { flex-direction: column; align-items: stretch; gap: 16px; }
@@ -378,7 +350,6 @@
   .intel-profile-highlights > div, .intel-profile-highlights > div + div { padding: 0; border-left: 0; }
   .intel-status-grid { grid-template-columns: minmax(0, 1fr); }
   .intel-section-status { flex-direction: row; align-items: center; justify-content: space-between; }
-  .intel-tabs > button { gap: 6px; padding: 12px 6px 10px; font-size: 15px; letter-spacing: .03em; }
   .intel-workspace .section-heading { flex-wrap: wrap; gap: 10px; }
   .intel-average-card { padding: 14px 12px; }
   .intel-average-card > strong { font-size: 30px; }

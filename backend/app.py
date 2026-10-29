@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
@@ -13,11 +14,12 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import pandas as pd
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .data import STATS, Store, demo_frame, nba_cache_fresh, nba_cache_id, player_list, read_csv, validate_frame
+from . import news, simulation
+from .data import Store, demo_frame, nba_cache_fresh, nba_cache_id, player_list, read_csv, validate_frame
 from .engine import american_probability, backtest, forecast
 from .nba import NBAUnavailableError, NoGamesError, import_game_logs, normalize_name, search_players, static_player_ids
 from .league import current_season, fetch_career, fetch_profile, fetch_roster, previous_season, summarize_history
@@ -25,10 +27,13 @@ from .parlay import MAX_LEGS, LegNotFound, price_parlay
 from .assistant import Coach
 from .learning import Learning
 from .llm import LLMClient
+from .stats import PROP_STATS, catalog, label as stat_label, validate_line as validate_market_line
 
 ROOT = Path(__file__).resolve().parent.parent
-Stat = Literal["points", "rebounds", "assists", "steals", "blocks"]
-Model = Literal["auto", "empirical", "normal", "poisson", "negative_binomial"]
+Stat = Literal[PROP_STATS]  # type: ignore[valid-type]
+Model = Literal["auto", "empirical", "normal", "poisson", "negative_binomial", "simulation"]
+DEFAULT_LOOKBACK = 60
+NEWS_TTL = {"headlines": 600, "injuries": 900, "transactions": 1800, "styles": 6 * 3600, "coaches": 24 * 3600}
 
 
 class StrictModel(BaseModel):
@@ -41,13 +46,14 @@ class ForecastRequest(StrictModel):
     stat: Stat = "points"
     line: float = Field(default=26.5, ge=0, le=200)
     model: Model = "auto"
-    lookback: int = Field(default=30, ge=10, le=82)
+    lookback: int = Field(default=DEFAULT_LOOKBACK, ge=10, le=82)
     odds_over: int = -110
     odds_under: int = -110
     expected_minutes: float | None = Field(default=None, ge=1, le=60)
     rest_days: int | None = Field(default=None, ge=0, le=30)
     opponent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,5}$")
     use_context: bool = True
+    simulations: int | None = Field(default=None, ge=simulation.MIN_SIMULATIONS, le=simulation.MAX_SIMULATIONS)
 
     @field_validator("line")
     @classmethod
@@ -62,13 +68,18 @@ class ForecastRequest(StrictModel):
         american_probability(value)
         return value
 
+    @model_validator(mode="after")
+    def validate_market(self):
+        validate_market_line(self.stat, self.line)
+        return self
+
 
 class BacktestRequest(StrictModel):
     dataset_id: str = Field(default="demo", min_length=1, max_length=80)
     player_id: str | None = Field(default=None, max_length=80)
     stat: Stat = "points"
     model: Model = "auto"
-    lookback: int = Field(default=30, ge=10, le=82)
+    lookback: int = Field(default=DEFAULT_LOOKBACK, ge=10, le=82)
     line: float | None = Field(default=None, ge=0, le=200)
     use_context: bool = True
 
@@ -78,6 +89,12 @@ class BacktestRequest(StrictModel):
         if value is not None:
             return ForecastRequest.validate_line(value)
         return value
+
+    @model_validator(mode="after")
+    def validate_market(self):
+        if self.line is not None:
+            validate_market_line(self.stat, self.line)
+        return self
 
 
 class NBARequest(StrictModel):
@@ -126,7 +143,7 @@ class ParlayLeg(StrictModel):
     line: float = Field(ge=0, le=200)
     side: Literal["over", "under"]
     model: Model = "auto"
-    lookback: int = Field(default=30, ge=10, le=82)
+    lookback: int = Field(default=DEFAULT_LOOKBACK, ge=10, le=82)
     expected_minutes: float | None = Field(default=None, ge=1, le=60)
     rest_days: int | None = Field(default=None, ge=0, le=30)
     opponent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,5}$")
@@ -137,10 +154,16 @@ class ParlayLeg(StrictModel):
     def validate_line(cls, value: float) -> float:
         return ForecastRequest.validate_line(value)
 
+    @model_validator(mode="after")
+    def validate_market(self):
+        validate_market_line(self.stat, self.line)
+        return self
+
 
 class ParlayRequest(StrictModel):
     legs: list[ParlayLeg] = Field(min_length=1, max_length=MAX_LEGS)
     book_odds: int | None = None
+    simulations: int | None = Field(default=None, ge=simulation.MIN_SIMULATIONS, le=simulation.MAX_SIMULATIONS)
 
     @field_validator("book_odds")
     @classmethod
@@ -184,7 +207,7 @@ class Focus(StrictModel):
     stat: Stat
     line: float = Field(ge=0, le=200)
     model: Model = "auto"
-    lookback: int = Field(default=30, ge=10, le=82)
+    lookback: int = Field(default=DEFAULT_LOOKBACK, ge=10, le=82)
     expected_minutes: float | None = Field(default=None, ge=1, le=60)
     rest_days: int | None = Field(default=None, ge=0, le=30)
     opponent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9]{2,5}$")
@@ -360,20 +383,64 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
 
     @app.get("/api/datasets")
     def datasets():
-        return {"datasets": store.datasets(), "stats": [{"id": stat, "label": stat.title()} for stat in STATS]}
+        return {"datasets": store.datasets(), "stats": catalog(),
+                "simulation": {"default": simulation.DEFAULT_SIMULATIONS, "choices": list(simulation.SIMULATION_CHOICES),
+                               "minimum": simulation.MIN_SIMULATIONS, "maximum": simulation.MAX_SIMULATIONS}}
 
     @app.get("/api/players")
     def players(dataset_id: str = "demo"):
         frame, _ = load(dataset_id)
         return {"players": player_list(frame)}
 
+    def saved_injury(player_id: str) -> dict | None:
+        """The player's entry on the last saved injury report (no network call), with the report's age."""
+        report = store.resource("news:injuries")
+        if not report:
+            return None
+        for team in report.get("teams", []):
+            for entry in team.get("injuries", []):
+                if entry.get("player_id") == player_id:
+                    return {**entry, "report_fetched_at": report.get("fetched_at")}
+        return None
+
+    def injury_warning(entry: dict) -> str:
+        what = " ".join(filter(None, [entry.get("side"), entry.get("injury"), (entry.get("detail") or "").lower() or None]))
+        comment = f" {entry['short_comment']}" if entry.get("short_comment") else ""
+        return (f"{entry['player']} is listed {entry['status'].upper()} on the latest injury report"
+                f"{f' ({what})' if what else ''}.{comment} The forecast assumes he plays.")
+
+    def calibrated_probabilities(result: dict, model: str) -> dict | None:
+        """The market's learned correction applied to an Auto forecast (it was learned on Auto's graded predictions)."""
+        if model != "auto":
+            return None
+        over, under, push = (result["probabilities"][key] for key in ("over", "under", "push"))
+        settled = over + under
+        if settled <= 1e-12:
+            return None
+        q = learning.calibrate_over(over / settled, result["stat"])
+        if q is None:
+            return None
+        entry = learning.calibration_for(result["stat"]) or {}
+        choice = entry.get("choice") or "shared"
+        source = (f"its own {stat_label(result['stat']).lower()} correction" if choice == "own"
+                  else "the shared correction across markets")
+        return {"over": q * settled, "under": (1 - q) * settled, "push": push, "choice": choice,
+                "samples": int(entry.get("samples") or learning.calibration_status().get("samples") or 0),
+                "note": f"Adjusted by {source}, learned from graded predictions and switched on because it beat the raw model on recent games."}
+
     @app.post("/api/forecast")
     def run_forecast(body: ForecastRequest):
         frame, info = check_player(body.dataset_id, body.player_id)
         try:
-            return forecast(frame, info, body.model_dump())
+            result = forecast(frame, info, body.model_dump())
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        result["calibrated"] = calibrated_probabilities(result, body.model)
+        injury = saved_injury(body.player_id) if info.get("source") == "nba_api" else None
+        result["injury"] = injury
+        if injury:
+            result["warnings"].insert(0, injury_warning(injury))
+        return result
 
     @app.post("/api/backtest")
     def run_backtest(body: BacktestRequest):
@@ -386,11 +453,20 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
     @app.post("/api/parlay")
     def run_parlay(body: ParlayRequest):
         try:
-            return price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load, calibrator=learning)
+            result = price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load, calibrator=learning,
+                                  simulations=body.simulations)
         except LegNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        flagged = []
+        for leg in result["legs"]:
+            injury = saved_injury(leg["player"]["id"])
+            leg["injury"] = injury
+            if injury and injury["player_id"] not in flagged:
+                flagged.append(injury["player_id"])
+                result["warnings"].insert(0, f"Leg {leg['index'] + 1}: " + injury_warning(injury))
+        return result
 
     @app.get("/api/assistant/status")
     def assistant_status():
@@ -651,6 +727,160 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
     def add_line(body: LineRequest):
         check_player(body.dataset_id, body.player_id)
         return store.add_line(body.model_dump(mode="json"))
+
+    # ---------- Newsroom ----------
+    news_locks: dict[str, Lock] = {}
+    news_guard = Lock()
+
+    def news_fresh(cached: dict, ttl: int) -> bool:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(cached["fetched_at"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return timedelta(0) <= age < timedelta(seconds=ttl)
+
+    def news_resource(key: str, fetcher, ttl: int, refresh: bool = False) -> dict:
+        """A cached feed: fresh copy, a new fetch, or the last saved copy marked stale when the provider fails."""
+        with news_guard:
+            lock = news_locks.setdefault(key, Lock())
+        with lock:
+            cached = store.resource(key)
+            if cached is not None and not refresh and news_fresh(cached, ttl):
+                return {**cached, "stale": False, "error": None}
+            try:
+                return {**store.save_resource(key, fetcher()), "stale": False, "error": None}
+            except (news.NewsUnavailableError, NBAUnavailableError) as exc:
+                if cached is not None:
+                    return {**cached, "stale": True, "error": f"{exc} Showing the last saved copy."}
+                raise HTTPException(502, str(exc)) from exc
+
+    def roster_players() -> list[dict]:
+        try:
+            return roster_or_saved()["players"]
+        except NBAUnavailableError:
+            return []
+
+    def headlines(refresh: bool = False) -> dict:
+        return news_resource("news:headlines", lambda: news.fetch_headlines(roster_players()), NEWS_TTL["headlines"], refresh)
+
+    def injuries(refresh: bool = False) -> dict:
+        return news_resource("news:injuries", lambda: news.fetch_injuries(roster_players()), NEWS_TTL["injuries"], refresh)
+
+    def transactions(refresh: bool = False) -> dict:
+        return news_resource("news:transactions", news.fetch_transactions, NEWS_TTL["transactions"], refresh)
+
+    def style_season(which: str) -> str:
+        return current_season() if which == "current" else previous_season(current_season())
+
+    def team_styles(which: str, refresh: bool = False) -> dict:
+        season = style_season(which)
+        return news_resource(f"news:styles:{season}", lambda: news.fetch_team_styles(season), NEWS_TTL["styles"], refresh)
+
+    def coaching_staffs(refresh: bool = False) -> dict:
+        season = current_season()
+
+        def fetch() -> dict:
+            league = news.nba_teams()
+
+            def staff(team: dict) -> dict:
+                try:
+                    return {**news.fetch_coaches(team["id"], season), "team": team["abbreviation"], "error": None}
+                except NBAUnavailableError as exc:
+                    return {"team_id": team["id"], "team": team["abbreviation"], "season": season, "coaches": [], "error": str(exc)}
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                staffs = list(pool.map(staff, league))
+            if all(item["error"] for item in staffs):
+                raise NBAUnavailableError("NBA Stats returned no coaching staffs. Try again later.")
+            return {"season": season, "teams": staffs, "provider": "NBA Stats / CommonTeamRoster coaching staffs"}
+
+        return news_resource(f"news:coaches:{season}", fetch, NEWS_TTL["coaches"], refresh)
+
+    def optional(call):
+        try:
+            return call(), None
+        except HTTPException as exc:
+            return None, str(exc.detail)
+
+    @app.get("/api/news/headlines")
+    def news_headlines(refresh: bool = False):
+        return headlines(refresh)
+
+    @app.get("/api/news/injuries")
+    def news_injuries(refresh: bool = False):
+        return injuries(refresh)
+
+    @app.get("/api/news/transactions")
+    def news_transactions(refresh: bool = False):
+        return transactions(refresh)
+
+    @app.get("/api/news/coaches")
+    def news_coaches(refresh: bool = False):
+        return coaching_staffs(refresh)
+
+    @app.get("/api/news/teams")
+    def news_teams(season: Literal["current", "previous"] = "current", refresh: bool = False):
+        styles = team_styles(season, refresh)
+        report, _ = optional(injuries)
+        staffs, _ = optional(coaching_staffs)
+        out = {team["team"]: sum(entry["status_key"] in ("out", "suspended") for entry in team["injuries"])
+               for team in (report or {}).get("teams", [])}
+        listed = {team["team"]: len(team["injuries"]) for team in (report or {}).get("teams", [])}
+        heads = {item["team"]: next((coach["name"] for coach in item["coaches"] if coach["head"]), None)
+                 for item in (staffs or {}).get("teams", [])}
+        teams = [{**team, "summary": news.style_sentence(team), "injuries_listed": listed.get(team["team"], 0),
+                  "injuries_out": out.get(team["team"], 0), "head_coach": heads.get(team["team"])} for team in styles["teams"]]
+        median_games = sorted(team["games"] for team in teams)[len(teams) // 2] if teams else 0
+        return {**styles, "teams": teams, "which": season, "median_games": median_games}
+
+    @app.get("/api/news/teams/{abbreviation}")
+    def news_team(abbreviation: str, refresh: bool = False):
+        code = abbreviation.upper()
+        team = next((item for item in news.nba_teams() if item["abbreviation"] == code), None)
+        if team is None:
+            raise HTTPException(404, "Unknown NBA team abbreviation.")
+        profiles, errors = {}, []
+        for which in ("current", "previous"):
+            styles, error = optional(lambda which=which: team_styles(which, refresh))
+            if styles:
+                profile = next((item for item in styles["teams"] if item["team"] == code), None)
+                if profile:
+                    profiles[which] = {**profile, "season": styles["season"], "summary": news.style_sentence(profile),
+                                       "team_count": styles["team_count"], "fetched_at": styles.get("fetched_at"), "stale": styles.get("stale")}
+            elif error:
+                errors.append(error)
+        staffs, staff_error = optional(lambda: coaching_staffs(refresh))
+        staff = next((item for item in (staffs or {}).get("teams", []) if item["team"] == code), None)
+        report, injury_error = optional(lambda: injuries(refresh))
+        feed, headline_error = optional(lambda: headlines(refresh))
+        moves, move_error = optional(lambda: transactions(refresh))
+        return {
+            "team": team, "profiles": profiles,
+            "coaches": staff["coaches"] if staff else [], "coaches_season": (staffs or {}).get("season"),
+            "injuries": next((item["injuries"] for item in (report or {}).get("teams", []) if item["team"] == code), []),
+            "headlines": [item for item in (feed or {}).get("articles", []) if code in item["teams"]][:12],
+            "transactions": [item for item in (moves or {}).get("transactions", []) if item["team"] == code][:15],
+            "errors": [error for error in (*errors, staff_error, injury_error, headline_error, move_error) if error],
+        }
+
+    @app.get("/api/news/players/{player_id}")
+    def news_player(player_id: str, refresh: bool = False):
+        player = current_player(player_id)
+        report, injury_error = optional(lambda: injuries(refresh))
+        entry, team_entries = None, []
+        for team in (report or {}).get("teams", []):
+            for item in team["injuries"]:
+                if item.get("player_id") == player_id:
+                    entry = item
+            if team["team"] == player.get("team"):
+                team_entries = [item for item in team["injuries"] if item.get("player_id") != player_id]
+        feed, _ = optional(lambda: headlines(refresh))
+        name_key = normalize_name(player["name"])
+        mentions = [item for item in (feed or {}).get("articles", [])
+                    if any(athlete.get("player_id") == player_id or normalize_name(athlete["name"]) == name_key for athlete in item["athletes"])]
+        return {"player_id": player_id, "team": player.get("team"), "injury": entry, "teammates": team_entries,
+                "headlines": mentions[:6], "report_fetched_at": (report or {}).get("fetched_at"),
+                "stale": bool((report or {}).get("stale")), "error": injury_error}
 
     dist = ROOT / "frontend" / "dist"
     if dist.is_dir():
