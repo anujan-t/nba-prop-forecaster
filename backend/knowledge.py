@@ -42,15 +42,16 @@ ENTRIES: tuple[Entry, ...] = (
     # ------------------------------------------------------------------ the app
     Entry("overview", "What COURTSIDE is",
           ("courtside", "app", "website", "site", "about", "purpose", "what is this", "what does this do", "features", "overview"),
-          "COURTSIDE is your NBA player-prop research app. It forecasts the chance a player goes over or under a line in 22 "
-          "markets, prices parlays with correlated legs, tracks your bets and grades them from box scores, and keeps a newsroom "
-          "of headlines, injuries, roster moves, team styles and the day's games with betting lines. It runs on your computer; "
-          "it is research, not betting advice.", "#/players", "Open Players"),
+          "COURTSIDE is your NBA betting research app. It forecasts the chance a player goes over or under a line in 22 "
+          "markets, rates every team for moneylines and spreads, prices parlays with correlated legs, tracks your bets and grades "
+          "them from box scores and final scores, and keeps a newsroom of headlines, injuries, roster moves, team styles and the "
+          "day's games with betting lines. It runs on your computer; it is research, not betting advice.", "#/players", "Open Players"),
     Entry("navigation", "Where everything is",
           ("tab", "tabs", "page", "pages", "menu", "navigate", "navigation", "where", "find", "section", "sections", "layout", "header"),
           "- **Players**: search any current player, then Props (forecast a line), Game log, Career and Lines (your line notebook).\n"
           "- **Parlay**: build and price a slip.\n- **My Bets**: tracked bets, grading, record and ROI.\n"
-          "- **News**: headlines, injury report, teams & coaches, roster moves, and games with betting lines.\n"
+          "- **News**: headlines, injury report, teams & coaches, roster moves, and games with betting lines and the team model's "
+          "moneyline and spread chances (add them to the slip from there).\n"
           "- **Coach**: this chat.\nThe header menu holds **How it works** (Method, Accuracy) and **Settings** (Appearance, Model, Data, Coach).",
           "#/players", "Open Players"),
     Entry("props", "Forecasting a prop",
@@ -257,11 +258,13 @@ ENTRIES: tuple[Entry, ...] = (
     Entry("spread", "Point spread",
           ("spread", "point spread", "ats", "against the spread", "cover", "covering", "handicap", "line for the game"),
           "The favourite must win by more than the spread: −5.5 means by 6 or more. The underdog at +5.5 covers by losing by 5 or "
-          "fewer or by winning. Ask me **what's the spread for the Lakers game?** for a current line.", kind="glossary"),
+          "fewer or by winning. Ask me **what's the spread for the Lakers game?** for the current line and the team model's "
+          "cover chance, or **add Lakers −5.5** to put it on your slip.", kind="glossary"),
     Entry("moneyline", "Moneyline",
           ("moneyline", "money line", "ml", "straight up", "outright", "who wins"),
           "A moneyline bet is on who wins the game outright. The favourite has minus odds (−200: risk $200 to win $100), the "
-          "underdog plus odds (+170: risk $100 to win $170).", kind="glossary"),
+          "underdog plus odds (+170: risk $100 to win $170). Ask me **who wins Lakers vs Celtics?** for the team model's chance, "
+          "or **add Lakers moneyline** to put it on your slip.", kind="glossary"),
     Entry("total", "Game totals",
           ("total", "totals", "over under", "o/u", "game total", "points total"),
           "A game total is an over/under on both teams' combined points, e.g. 228.5. Ask **what's the total for Celtics–Knicks?** "

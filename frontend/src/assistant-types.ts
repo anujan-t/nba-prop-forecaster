@@ -1,5 +1,5 @@
 import type { CoachEntry, Game, NewsArticle, Transaction } from './news-types';
-import type { FairOdds, ParlayLegRequest, ParlayResult, Side } from './parlay-types';
+import type { AnyLegRequest, FairOdds, GameMarket, ParlayResult, Side } from './parlay-types';
 import type { InjuryEntry, Model, Stat } from './types';
 
 /**
@@ -9,9 +9,9 @@ import type { InjuryEntry, Model, Stat } from './types';
 
 // ---------- Chat ----------
 
-/** A slip leg as the client stores it: the request plus display labels. */
+/** A slip leg as the client stores it: the request plus display labels (`player` is the team for a moneyline or spread). */
 export interface ChatSlipLeg {
-  request: ParlayLegRequest;
+  request: AnyLegRequest;
   label: { player: string; team: string };
 }
 
@@ -228,7 +228,8 @@ export interface AssistantStatus {
 export type LegStatus = 'pending' | 'won' | 'lost' | 'push' | 'void';
 export type BetStatus = 'pending' | 'won' | 'lost' | 'void' | 'reduced';
 
-export interface TrackedLeg {
+export interface PlayerTrackedLeg {
+  kind?: 'player';
   player_id: string;
   player: string;
   team: string;
@@ -240,6 +241,28 @@ export interface TrackedLeg {
   actual: number | null; // the stat in the graded game
   settled_at: string | null;
 }
+
+/** A tracked moneyline or spread: `player` is the team's name and `actual` the team's final margin. */
+export interface GameTrackedLeg {
+  kind: 'game';
+  player_id: string; // the team code
+  player: string;
+  team: string;
+  stat: GameMarket;
+  market: GameMarket;
+  line: number | null;
+  side: 'home' | 'away';
+  opponent: string;
+  home: boolean;
+  game_id: string;
+  date: string;
+  probability: number;
+  status: LegStatus;
+  actual: number | null;
+  settled_at: string | null;
+}
+
+export type TrackedLeg = PlayerTrackedLeg | GameTrackedLeg;
 
 export interface TrackedBet {
   id: string;

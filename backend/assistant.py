@@ -29,8 +29,10 @@ from .knowledge import KNOWLEDGE
 from .llm import LLMClient, LLMError
 from .nba import NBAUnavailableError
 from .news import NewsUnavailableError
+from .newsroom import game_day
 from .parlay import MAX_LEGS, LegNotFound, fair_odds, price_parlay
 from .stats import stat_values, with_stat
+from .teams import GameModelUnavailable
 
 DEFAULTS = {"model": "auto", "lookback": 60, "expected_minutes": None, "rest_days": None, "opponent": None, "use_context": True}
 STANDARD_LEG_ODDS = -110
@@ -55,6 +57,11 @@ THANKS = re.compile(r"(?:(?:ok(?:ay)?|cool|nice|great|awesome|perfect|got it|sou
 INFERABLE_STATS = ("points", "rebounds", "assists", "threes", "pts_reb_ast", "pts_reb", "pts_ast", "reb_ast", "steals", "blocks")
 STANDALONE_INTENTS = {"teach", "forget", "undo", "clear", "help", "greet", "track", "settle", "learning", "remove", "update", "parlay"}
 WINDOW = re.compile(r"\b(?:last|past|previous)\s+\d{1,2}\s+games?\b")
+# "Add", "bet on", "I'll take" ... a moneyline or spread; "should I take ...?" is a question, not a command.
+TEAM_ADD = re.compile(r"\b(?:add|put|throw|include|tack|stack|parlay|lock in|i like|i'?ll take|take the|bet on|bet the|want to bet|"
+                      r"wanna bet|back the|give me)\b")
+TEAM_QUESTION = re.compile(r"\bshould\b|\?|^(?:is|are|does|do|will|would|can|could|what|who|which|how|when)\b")
+EARLY_CHAT = "_Early season: the ratings still lean on last season, so treat big gaps with the book with suspicion._"
 
 
 def strip_vocative(text: str) -> str:
@@ -98,9 +105,39 @@ def slip_key(slip: dict | None) -> tuple:
     """What a slip bets on, ignoring display labels and float formatting."""
     if not slip:
         return ((), None)
-    legs = tuple((leg["request"]["player_id"], leg["request"]["stat"], leg["request"]["side"], float(leg["request"]["line"]))
-                 for leg in slip.get("legs", []))
-    return legs, slip.get("book_odds")
+    return tuple(leg_signature(leg["request"]) for leg in slip.get("legs", [])), slip.get("book_odds")
+
+
+def leg_signature(request: dict) -> tuple:
+    if request.get("kind") == "game":
+        line = request.get("line")
+        return ("game", str(request["game_id"]), request["market"], request["team"], None if line is None else float(line))
+    return request["player_id"], request["stat"], request["side"], float(request["line"])
+
+
+def is_game_leg(leg: dict) -> bool:
+    return (leg.get("request") or {}).get("kind") == "game"
+
+
+def same_request(a: dict, b: dict) -> bool:
+    """Same bet with the same settings. The API tags player legs kind="player" by default, so a leg that came back
+    through it has to match the untagged request the coach builds."""
+    return {k: v for k, v in a.items() if k != "kind"} == {k: v for k, v in b.items() if k != "kind"}
+
+
+def spread_text(line: float | None) -> str:
+    if line is None:
+        return "n/a"
+    return "PK" if line == 0 else f"+{line:g}" if line > 0 else f"−{abs(line):g}"
+
+
+def describe_leg(leg: dict) -> str:
+    """'Nikola Jokić Over 26.5 points', 'Cleveland Cavaliers moneyline' or 'Boston Celtics −5.5'."""
+    request = leg["request"]
+    if request.get("kind") == "game":
+        name = leg["label"]["player"]
+        return f"{name} moneyline" if request["market"] == "moneyline" else f"{name} {spread_text(float(request['line']))}"
+    return f"{leg['label']['player']} {request['side'].title()} {request['line']:g} {nlu.phrase(request['stat'])}"
 
 
 def verdict(edge: float) -> str:
@@ -232,13 +269,14 @@ class Coach:
     def __init__(self, roster: Callable[[], list[dict]], history: Callable[[str, bool], tuple[str, pd.DataFrame, dict]],
                  load: Callable[[str], tuple[pd.DataFrame, dict]], learning: Any = None, llm: LLMClient | None = None,
                  today: Callable[[], date] | None = None, memory: Any = None, newsroom: Any = None,
-                 profile: Callable[[str], dict] | None = None):
+                 profile: Callable[[str], dict] | None = None, games: Any = None):
         self.roster, self.history, self.load = roster, history, load
         self.learning, self.llm = learning, llm
         self.memory = memory or learning or LocalMemory()
         self.today = today or eastern_today
         self.newsroom = newsroom
-        self.desk = Desk(newsroom, roster, profile, self.today, learning)
+        self.games = games
+        self.desk = Desk(newsroom, roster, profile, self.today, learning, games)
         self.llm_error: str | None = None
 
     # ------------------------------------------------------------------ status
@@ -318,7 +356,7 @@ class Coach:
         has_spec = any(spec.stat or spec.side or spec.line is not None for spec in specs)
         has_prop = has_spec and (bool(mentions) or self.refers_to_focus(parsed.text, turn) or any(spec.line is not None for spec in specs))
         question = bool(names & {"forecast", "house", "hit_rate", "summary", "explain"}) or "?" in parsed.text
-        slipish = self.slipish(turn, parsed, mentions, has_spec)
+        slipish = self.slipish(turn, parsed, mentions, has_spec, teams)
         if "help" in names:
             entry = KNOWLEDGE.best(text, 5.0)
             if entry is not None and entry.id not in ("coach", "navigation", "overview"):
@@ -339,6 +377,11 @@ class Coach:
             if rest and "add" in names:
                 self.add_legs(turn, nlu.parse(" and ".join(rest), self.today()), index)
             return
+        if "remove" in names and teams and not mentions and turn.slip["legs"] \
+                and re.search(r"\b(?:remove|delete|take (?:it |them )?off|get rid of)\b", nlu.fold(text)):
+            turn.say(f"There's no {self.desk.nickname(teams[0])} leg in your slip. Say **remove leg 2**, or name a player or team on it.")
+            turn.suggest(*(f"remove leg {i + 1}" for i in range(min(3, len(turn.slip["legs"])))))
+            return
         if "update" in names and slipish:
             changes = [s for s in parsed.segments if CHANGE.search(nlu.fold(s))] or [parsed.text]
             if self.update(turn, nlu.parse(" ".join(changes), self.today()), index):
@@ -346,6 +389,8 @@ class Coach:
                 if rest and "add" in names:
                     self.add_legs(turn, nlu.parse(" and ".join(rest), self.today()), index)
                 return
+        if teams and self.games is not None and self.game_command(turn, parsed, index, has_spec):
+            return
         command = "add" in names and has_spec and bool(mentions)
         if self.llm is not None and not command and self.llm_turn(turn):
             return
@@ -420,13 +465,15 @@ class Coach:
                     teams.remove(team)
         return keep
 
-    def slipish(self, turn: Turn, parsed: nlu.Parsed, mentions: list[nlu.Mention], has_spec: bool) -> bool:
+    def slipish(self, turn: Turn, parsed: nlu.Parsed, mentions: list[nlu.Mention], has_spec: bool, teams: list[str] | None = None) -> bool:
         """Whether a remove/change/clear/track verb is about the slip rather than the league ("did the Lakers cut anyone?")."""
         if parsed.legs or has_spec:
             return True
-        if re.search(r"\b(?:legs?|slip|parlay|ticket|it|that|this|them|last one|everything|all|book odds)\b", nlu.fold(parsed.text)):
+        if re.search(r"\b(?:legs?|slip|parlay|ticket|it|that|this|them|last one|everything|all|book odds|moneyline|ml|spread)\b", nlu.fold(parsed.text)):
             return True
-        ids = {leg["request"]["player_id"] for leg in turn.slip["legs"]}
+        if any(is_game_leg(leg) and leg["request"]["team"] in (teams or []) for leg in turn.slip["legs"]):
+            return True
+        ids = {leg["request"]["player_id"] for leg in turn.slip["legs"] if not is_game_leg(leg)}
         return any(any(candidate["id"] in ids for candidate in mention.candidates) for mention in mentions)
 
     def league_question(self, turn: Turn, parsed: nlu.Parsed, text: str, index: nlu.PlayerIndex, mentions: list[nlu.Mention],
@@ -464,7 +511,7 @@ class Coach:
     def narrow(self, turn: Turn, candidates: list[dict]) -> list[dict]:
         if len(candidates) <= 1:
             return candidates
-        preferred = {leg["request"]["player_id"] for leg in turn.slip["legs"]}
+        preferred = {leg["request"]["player_id"] for leg in turn.slip["legs"] if not is_game_leg(leg)}
         if turn.focus:
             preferred.add(turn.focus["player_id"])
         if turn.context.get("player_id"):
@@ -562,7 +609,7 @@ class Coach:
             mention = mentions[0]
             candidates = mention.candidates
             if len(candidates) > 1:
-                preferred = {leg["request"]["player_id"] for leg in turn.slip["legs"]}
+                preferred = {leg["request"]["player_id"] for leg in turn.slip["legs"] if not is_game_leg(leg)}
                 if turn.focus:
                     preferred.add(turn.focus["player_id"])
                 if turn.context.get("player_id"):
@@ -730,8 +777,9 @@ class Coach:
         label = {"player": result["player"]["name"], "team": player.get("team") or result["player"]["team"]}
         description = f"{label['player']} {side.title()} {line:g} {nlu.phrase(stat)}"
         probability = result["probabilities"][side]
-        existing = next((i for i, leg in enumerate(legs) if leg["request"]["player_id"] == player["id"] and leg["request"]["stat"] == stat), None)
-        if existing is not None and legs[existing]["request"] == request:
+        existing = next((i for i, leg in enumerate(legs) if not is_game_leg(leg) and leg["request"]["player_id"] == player["id"]
+                         and leg["request"]["stat"] == stat), None)
+        if existing is not None and same_request(legs[existing]["request"], request):
             turn.say(f"Leg {existing + 1} is already **{description}** — {pct(probability)}.")
             turn.entities.update({"player_id": player["id"], "stat": stat, "line": line, "leg": existing + 1})
             return True
@@ -764,12 +812,24 @@ class Coach:
         text = nlu.name_key(parsed.text)
         words = set(text.split())
         stat_words = {nlu.STAT_LOOKUP[w] for w in words if w in nlu.STAT_LOOKUP}
+        teams = {mention.code for mention in topics.find_teams(parsed.text)}
+        market, _ = nlu.team_market(parsed.text)
+        players = index.find(parsed.text)
         for i, leg in enumerate(legs):
+            if is_game_leg(leg):
+                request = leg["request"]
+                if request["team"] in teams and (market is None or request["market"] == market):
+                    targets.append(i)
+                continue
             tokens = nlu.name_key(leg["label"]["player"]).split()
             named = nlu.name_key(leg["label"]["player"]) in text or (tokens and (tokens[-1] in words or tokens[0] in words and len(tokens[0]) > 3))
-            alias_hit = any(m.candidates and any(p["id"] == leg["request"]["player_id"] for p in m.candidates) for m in index.find(parsed.text))
+            alias_hit = any(m.candidates and any(p["id"] == leg["request"]["player_id"] for p in m.candidates) for m in players)
             if (named or alias_hit) and (not stat_words or leg["request"]["stat"] in stat_words):
                 targets.append(i)
+        if not targets and market:
+            targets = [i for i, leg in enumerate(legs) if is_game_leg(leg) and leg["request"]["market"] == market]
+            if len(targets) > 1:
+                targets = []
         if not targets and re.search(r"\b(?:it|that|this|that leg|this leg)\b", nlu.fold(parsed.text)):
             last = turn.context.get("leg")
             if isinstance(last, int) and 1 <= last <= len(legs):
@@ -785,13 +845,12 @@ class Coach:
             return
         targets = sorted(set(self.leg_targets(turn, parsed, index)), reverse=True)
         if not targets:
-            turn.say("Which leg should I remove? Say **remove leg 2** or name the player.")
+            turn.say("Which leg should I remove? Say **remove leg 2**, or name the player or team.")
             turn.suggest(*(f"remove leg {i + 1}" for i in range(min(3, len(legs)))))
             return
         for i in targets:
             leg = legs.pop(i)
-            request = leg["request"]
-            turn.act("remove_leg", f"Removed leg {i + 1}: {leg['label']['player']} {request['side'].title()} {request['line']:g} {nlu.phrase(request['stat'])}", i + 1)
+            turn.act("remove_leg", f"Removed leg {i + 1}: {describe_leg(leg)}", i + 1)
         turn.say(f"Removed {len(targets)} leg{'s' if len(targets) > 1 else ''}. {len(legs)} left." if legs else "Removed. Your slip is now empty.")
         turn.entities["leg"] = None
 
@@ -807,6 +866,8 @@ class Coach:
             turn.say("Which leg should I change? Say e.g. **flip leg 2** or **change leg 1 line to 27.5**.")
             return True
         i = targets[0]
+        if is_game_leg(legs[i]):
+            return self.update_game_leg(turn, parsed, i)
         request = legs[i]["request"]
         new_side, new_line = request["side"], request["line"]
         explicit = re.search(r"\b(?:to|make it|the|an?)\s+(over|under)\b|\b(over|under)\s+(?:instead|now)\b", text)
@@ -846,6 +907,194 @@ class Coach:
         turn.slip["book_odds"] = odds
         turn.act("set_book_odds", f"Set the parlay's book odds to {odds_text(odds)}" if odds is not None else "Cleared the book odds")
 
+    # ------------------------------------------------------------------ moneylines and spreads
+    def game_command(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex, has_spec: bool) -> bool:
+        """Adds moneyline and spread legs ("add cavs ml", "Celtics -5.5 and Jokić over 26.5 points") or answers a spread
+        question ("is Lakers +3.5 good?"); False when the message is something else (lines questions go to the desk)."""
+        folded = nlu.fold(parsed.text)
+        asks = bool(TEAM_QUESTION.search(folded))
+        adds = bool(TEAM_ADD.search(folded)) and not re.search(r"\bshould\b", folded)
+        parts, props = [], []
+        for segment in parsed.segments:
+            found = topics.find_teams(segment)
+            market, line = nlu.team_market(segment)
+            if found and market and not self.player_mentions(index, segment, list(found)):
+                parts.append((found[0].code, market, line))
+            else:
+                props.append(segment)
+        if not parts:
+            found = topics.find_teams(parsed.text)
+            if adds and found and not has_spec and not self.player_mentions(index, parsed.text, list(found)):
+                nick = self.desk.nickname(found[0].code)
+                turn.clarification = {"prompt": f"{nick}: moneyline or spread?", "options": [
+                    {"label": "Moneyline", "message": f"add {nick} moneyline"}, {"label": "Spread", "message": f"add {nick} spread"}]}
+                turn.say(f"Moneyline or spread for the {nick}?")
+                return True
+            return False
+        if asks and not adds:
+            code, market, line = parts[0]
+            return market == "spread" and line is not None and self.game_line_question(turn, code, line, parsed.odds)
+        single = len(parts) == 1 and not props
+        for code, market, line in parts:
+            self.add_game_leg(turn, code, market, line, parsed.odds if single and parsed.odds_problem is None else None)
+        if props:
+            self.add_legs(turn, nlu.parse(" and ".join(props), self.today()), index)
+        return True
+
+    def find_game(self, turn: Turn, code: str) -> dict | None:
+        """The team's next game that hasn't tipped off, or None after explaining why."""
+        nick = self.desk.nickname(code)
+        if self.newsroom is None:
+            turn.say("I need the schedule to find the game, and the newsroom isn't connected right now.")
+            return None
+        try:
+            game = self.newsroom.next_game(code)
+        except NewsUnavailableError as exc:
+            turn.say(f"I couldn't load the schedule: {exc}")
+            return None
+        if game is None:
+            turn.say(f"I don't see an upcoming {nick} game in the next 10 days.")
+            return None
+        if game["state"] != "pre":
+            turn.say(f"The {nick} game {self.desk.game_phrase(game, code)} has already tipped off; COURTSIDE prices games before tipoff.")
+            return None
+        return game
+
+    def game_request(self, turn: Turn, game: dict, code: str, market: str, line: float | None) -> dict | None:
+        nick = self.desk.nickname(code)
+        _, other, home = self.desk.side(game, code)
+        if market == "spread" and line is None:
+            line = (game.get("odds") or {}).get("home_spread" if home else "away_spread")
+            if line is None:
+                turn.say(f"No spread is posted yet for the {nick} {self.desk.game_phrase(game, code)}. Name the number, e.g. **add {nick} -3.5**.")
+                turn.suggest(f"add {nick} moneyline")
+                return None
+        if line is not None and (line * 2 != int(line * 2) or abs(line) > 60):
+            turn.say(f"{line:g} isn't a valid spread; use a whole or half point between −60 and +60.")
+            return None
+        return {"kind": "game", "game_id": str(game["id"]), "date": (game_day(game) or self.today()).isoformat(), "team": code,
+                "opponent": other["team"], "home": home, "market": market, "line": None if market == "moneyline" else float(line)}
+
+    def quote_game(self, turn: Turn, request: dict) -> dict | None:
+        try:
+            return self.games.leg(request)
+        except (GameModelUnavailable, NBAUnavailableError) as exc:
+            turn.say(f"I couldn't price that: {exc}")
+            return None
+
+    def add_game_leg(self, turn: Turn, code: str, market: str, line: float | None, odds: int | None = None) -> None:
+        game = self.find_game(turn, code)
+        request = game and self.game_request(turn, game, code, market, line)
+        quote = request and self.quote_game(turn, request)
+        if not quote:
+            return
+        leg = {"request": request, "label": {"player": self.desk.team_name(code), "team": code}}
+        description = describe_leg(leg)
+        legs = turn.slip["legs"]
+        existing = next((i for i, item in enumerate(legs) if is_game_leg(item) and str(item["request"]["game_id"]) == request["game_id"]
+                         and item["request"]["market"] == market), None)
+        if existing is not None and same_request(legs[existing]["request"], request):
+            turn.say(f"Leg {existing + 1} is already **{description}** — {pct(quote['probability'])}.")
+            number = existing + 1
+        elif existing is not None:
+            old = describe_leg(legs[existing])
+            legs[existing] = leg
+            number = existing + 1
+            turn.act("replace_leg", f"Replaced leg {number} ({old}) with {description}", number)
+            turn.say(f"Replaced leg {number} with **{description}** — {pct(quote['probability'])} by the team model.")
+        elif len(legs) >= MAX_LEGS:
+            turn.say(f"Your slip already has {MAX_LEGS} legs, the maximum. Remove one first.")
+            return
+        else:
+            legs.append(leg)
+            number = len(legs)
+            turn.act("add_leg", f"Added leg {number}: {description}", number)
+            turn.say(f"Added leg {number}: **{description}** {self.desk.game_phrase(game, code)} — {pct(quote['probability'])} by the team model.")
+        self.say_game_quote(turn, quote, code, odds)
+        turn.entities.update({"team": code, "leg": number})
+
+    def game_line_question(self, turn: Turn, code: str, line: float, odds: int | None) -> bool:
+        game = self.find_game(turn, code)
+        request = game and self.game_request(turn, game, code, "spread", line)
+        quote = request and self.quote_game(turn, request)
+        if not quote:
+            return True
+        nick = self.desk.nickname(code)
+        push = f", pushes {pct(quote['push'])}" if quote["push"] > 1e-9 else ""
+        turn.say(f"**{self.desk.team_name(code)} {spread_text(line)}** {self.desk.game_phrase(game, code)}: covers **{pct(quote['probability'])}**"
+                 f"{push} by the team model.")
+        self.say_game_quote(turn, quote, code, odds)
+        turn.cards.append(self.desk.games_card("Game lines", game_day(game) or self.today(), [game]))
+        turn.entities.update({"team": code})
+        turn.suggest(f"add {nick} {spread_text(line)}", f"add {nick} moneyline", f"{nick} injuries")
+        return True
+
+    def say_game_quote(self, turn: Turn, quote: dict, code: str, odds: int | None) -> None:
+        """The model's line and win chance, the price check, who's out, and the early-season caveat."""
+        nick = self.desk.nickname(code)
+        text = f"Model line: {nick} {spread_text(quote['fair_spread'])}, {pct(quote['win_probability'])} to win"
+        if odds is not None:
+            lose = max(0.0, 1 - quote["probability"] - quote["push"])
+            text += ". " + leg_house(quote["probability"], lose, odds)["note"]
+        elif quote.get("book"):
+            book = quote["book"]
+            no_vig = f" ({pct(book['no_vig'])} without the vig)" if book.get("no_vig") is not None else ""
+            text += f"; the book's {odds_text(book['odds'])} needs {pct(book['implied'])}{no_vig}."
+        turn.say(text if text.endswith(".") else text + ".")
+        out = self.game_absences(code, quote["opponent"])
+        if out:
+            turn.say(f"Listed out or doubtful: {out}. The team model doesn't adjust for injuries.")
+        if quote.get("early_season") and EARLY_CHAT not in turn.lines:
+            turn.say(EARLY_CHAT)
+
+    def game_absences(self, *codes: str) -> str:
+        if self.newsroom is None:
+            return ""
+        report, _ = self.newsroom.attempt(self.newsroom.injuries)
+        parts = []
+        for code in codes:
+            names = [entry["player"] for team in (report or {}).get("teams", []) if team["team"] == code
+                     for entry in team["injuries"] if entry.get("status_key") in ("out", "suspended", "doubtful")]
+            if names:
+                parts.append(f"{code} {', '.join(names[:4])}{' and more' if len(names) > 4 else ''}")
+        return "; ".join(parts)
+
+    def update_game_leg(self, turn: Turn, parsed: nlu.Parsed, i: int) -> bool:
+        """Flips a moneyline or spread to the other team, or moves a spread's line."""
+        legs = turn.slip["legs"]
+        request = legs[i]["request"]
+        text = nlu.fold(parsed.text).replace("−", "-")
+        updated = dict(request)
+        if re.search(r"\b(?:flip|switch|swap|other side|opposite|other team)\b", text):
+            updated.update(team=request["opponent"], opponent=request["team"], home=not request["home"])
+            if request["market"] == "spread":
+                updated["line"] = -float(request["line"])
+        move = re.search(r"\b(?:to|at|line(?:\s+to)?|=|make it)\s*([+-]?)\s?(\d{1,2}(?:\.\d)?)\b", text)
+        if move:
+            if request["market"] != "spread":
+                turn.say(f"Leg {i + 1} is a moneyline, which has no line. Say **add {self.desk.nickname(request['team'])} -3.5** for a spread.")
+                return True
+            value = float(move.group(2))
+            sign = move.group(1) or ("-" if float(updated["line"]) < 0 else "+")
+            value = -value if sign == "-" else value
+            if value * 2 != int(value * 2) or abs(value) > 60:
+                turn.say(f"{value:g} isn't a valid spread; use a whole or half point between −60 and +60.")
+                return True
+            updated["line"] = value
+        if updated == request:
+            turn.say(f"Leg {i + 1} is already **{describe_leg(legs[i])}**. Say **flip leg {i + 1}** to back the other team"
+                     + (f" or **change leg {i + 1} to -4.5**." if request["market"] == "spread" else "."))
+            return True
+        quote = self.quote_game(turn, updated)
+        if not quote:
+            return True
+        legs[i] = {"request": updated, "label": {"player": self.desk.team_name(updated["team"]), "team": updated["team"]}}
+        description = describe_leg(legs[i])
+        turn.act("update_leg", f"Changed leg {i + 1} to {description}", i + 1)
+        turn.say(f"Leg {i + 1} is now **{description}** — {pct(quote['probability'])}.")
+        turn.entities.update({"team": updated["team"], "leg": i + 1})
+        return True
+
     def clear(self, turn: Turn) -> None:
         if not turn.slip["legs"] and turn.slip.get("book_odds") is None:
             turn.say("Your slip is already empty.")
@@ -880,7 +1129,8 @@ class Coach:
             turn.say("Your slip is empty. Add a leg first, e.g. **add Nikola Jokić over 26.5 points**.")
             return None
         try:
-            result = price_parlay([leg["request"] for leg in legs], turn.slip.get("book_odds"), self.load, calibrator=self.learning)
+            result = price_parlay([leg["request"] for leg in legs], turn.slip.get("book_odds"), self.load, calibrator=self.learning,
+                                  team_model=self.games)
         except (ValueError, LegNotFound) as exc:
             turn.say(f"I couldn't price the slip: {exc}")
             return None
@@ -916,7 +1166,7 @@ class Coach:
         for pair in result["pairs"][:8]:
             turn.say(f"- Legs {pair['a'] + 1} & {pair['b'] + 1}: {pair['note']}")
         if not linked:
-            turn.say("All legs are for players on different teams, so the model multiplies their chances.")
+            turn.say("Every pair of legs is independent (different teams or games), so the model multiplies their chances.")
 
     def leg_question(self, turn: Turn, parsed: nlu.Parsed, index: nlu.PlayerIndex) -> None:
         spec = nlu.parse_leg(parsed.text)
@@ -1153,7 +1403,7 @@ class Coach:
                          "“who coaches the Warriors?”, “how do the Thunder play?”, “which team plays fastest?”, “standings”",
                          "- **Games & lines:** “what games are on tonight?”, “what's the spread for the Lakers game?”, “did the Knicks win?”",
                          "- **Props & research:** “Jokić over 26.5 points?”, “what's SGA averaging?”, “how often has Wemby had 4+ blocks in his last 10?”",
-                         "- **Build & price the slip:** “add Jokić over 26.5 points and Murray 21+ points”, “flip leg 2”, “book has it at +450 — good price?”",
+                         "- **Build & price the slip:** “add Jokić over 26.5 points and Murray 21+ points”, “add Celtics −5.5”, “flip leg 2”, “book has it at +450 — good price?”",
                          "- **Track & learn:** “track this for $10 at +450”, “grade my bets”, “are you getting smarter?”",
                          "- **The app & betting basics:** “how does the simulator work?”, “how accurate is the model?”, “what does +150 mean?”, “what's the vig?”"):
                 turn.say(line)
@@ -1210,11 +1460,11 @@ class Coach:
             return False
 
     def system_prompt(self, turn: Turn) -> str:
-        slip = [f"{i + 1}. {leg['label']['player']} {leg['request']['side']} {leg['request']['line']:g} {nlu.phrase(leg['request']['stat'])}"
-                for i, leg in enumerate(turn.slip["legs"])]
+        slip = [f"{i + 1}. {describe_leg(leg)}" for i, leg in enumerate(turn.slip["legs"])]
         focus = turn.focus
         return (
-            "You are COURTSIDE Coach, the assistant inside COURTSIDE, a local NBA player-prop research app. Pages: Players (Props "
+            "You are COURTSIDE Coach, the assistant inside COURTSIDE, a local NBA betting research app (player props, plus moneylines "
+            "and spreads from a team model). Pages: Players (Props "
             "forecasts, Game log, Career, Lines notebook), Parlay, My Bets, News (Headlines, Injury report, Teams & coaches, Roster "
             "moves, Games with betting lines), Coach; menus How it works (Method, Accuracy) and Settings (Appearance, Model, Data, Coach). "
             "Answer any question about NBA betting, the NBA (news, injuries, schedules, scores, game lines, teams, coaches, playing "
@@ -1226,7 +1476,8 @@ class Coach:
             "losses or bigger stakes; if the user seems distressed, mention 1-800-GAMBLER. (4) If a question has nothing to do with "
             "basketball, betting or the app, decline in one sentence and say what you can help with. (5) Supported prop markets: "
             "points, rebounds, assists, threes, steals, blocks, turnovers, PRA and the other combos, stocks, shooting makes and "
-            "attempts, offensive and defensive rebounds, fouls, double-doubles and triple-doubles. (6) Be concise: at most 150 words, "
+            "attempts, offensive and defensive rebounds, fouls, double-doubles and triple-doubles; game moneylines and point spreads "
+            "come from the team model (the user adds those by command, e.g. 'add Celtics -5.5'). (6) Be concise: at most 150 words, "
             "plain text with **bold** and '- ' bullets only; the app shows cards for tool results, so summarize rather than list everything. "
             f"Today (US Eastern): {self.today().isoformat()}. Current slip: {('; '.join(slip)) or 'empty'}; book odds: "
             f"{odds_text(turn.slip.get('book_odds')) if turn.slip.get('book_odds') is not None else 'none'}. "
@@ -1369,7 +1620,9 @@ class Coach:
             return self.desk.data_odds(odds, stake)
         if name == "get_slip":
             result = self.price(turn, card=False) if turn.slip["legs"] else None
-            return {"legs": [{"leg": i + 1, **leg["label"], **{k: leg["request"][k] for k in ("stat", "side", "line")}} for i, leg in enumerate(turn.slip["legs"])],
+            return {"legs": [{"leg": i + 1, "description": describe_leg(leg), **leg["label"],
+                              **{k: leg["request"].get(k) for k in (("market", "team", "opponent", "line") if is_game_leg(leg) else ("stat", "side", "line"))}}
+                             for i, leg in enumerate(turn.slip["legs"])],
                     "book_odds": turn.slip.get("book_odds"),
                     "probability": result and result["probability"], "independent_probability": result and result["independent_probability"]}
         if name == "find_player":

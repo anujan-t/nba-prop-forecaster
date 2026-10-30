@@ -19,8 +19,10 @@ import Methodology from './Methodology';
 import { launchBall, prefersReducedMotion } from './motion';
 import MyBets from './MyBets';
 import NewsPage, { newsTabs } from './NewsPage';
-import { MAX_LEGS, bookOddsText, chatSlip, legFromForecast, sideNames, statLabel, validBookOdds } from './parlay';
-import type { Side } from './parlay-types';
+import type { GameSlipActions } from './NewsPage';
+import { MAX_LEGS, bookOddsText, chatSlip, legDescription, legFromForecast, sideNames, statLabel, validBookOdds } from './parlay';
+import type { LegLabel } from './parlay';
+import type { GameLegRequest, Side } from './parlay-types';
 import { SlipButton, SlipDrawer } from './ParlaySlip';
 import ParlayView from './ParlayView';
 import PlayerIntelligence from './PlayerIntelligence';
@@ -54,9 +56,9 @@ const compactQuery = '(max-width: 768px)';
 interface PageCopy { number: string; eyebrow: string; title: string; description: string; documentTitle: string }
 const pageCopy: Record<Page, PageCopy> = {
   players: { number: '01', eyebrow: 'EVERY CURRENT NBA PLAYER', title: 'Every line has a story.', description: 'The whole league and every market: points, threes, PRA, stocks, double-doubles and more. Real game history, simulated a quarter-million times.', documentTitle: 'Players' },
-  parlay: { number: '02', eyebrow: 'STACK THE LEGS', title: 'Every leg has to land.', description: 'Combine props into one parlay and see the chance that all of them hit. Same-player legs are priced together from the same simulated games.', documentTitle: 'Parlay' },
+  parlay: { number: '02', eyebrow: 'STACK THE LEGS', title: 'Every leg has to land.', description: 'Combine props, moneylines and spreads into one parlay and see the chance that all of them hit. Same-player legs are priced together from the same simulated games; same-game legs from the team model.', documentTitle: 'Parlay' },
   bets: { number: '03', eyebrow: 'KEEP SCORE', title: 'The scoreboard settles it.', description: 'Track the parlays you research, grade them against final box scores, and see whether the model is earning its keep.', documentTitle: 'My Bets' },
-  news: { number: '04', eyebrow: 'THE NEWSROOM', title: 'Know before the line moves.', description: 'Headlines, tonight’s games and lines, injuries, roster moves, coaching staffs and how every team plays, in one place.', documentTitle: 'News' },
+  news: { number: '04', eyebrow: 'THE NEWSROOM', title: 'Know before the line moves.', description: 'Headlines, tonight’s games with the model’s moneyline and spread chances, injuries, roster moves, coaching staffs and how every team plays, in one place.', documentTitle: 'News' },
   coach: { number: '05', eyebrow: 'THE HUDDLE', title: 'Talk it through.', description: 'Ask who’s out, what’s on tonight, how a team plays or what a price means, check your slip against the house, or build the parlay by command. The same conversation as the Ask Coach drawer.', documentTitle: 'Coach' },
   how: { number: '06', eyebrow: 'HOW IT WORKS / OPEN THE BLACK BOX', title: 'Nothing up our sleeve.', description: 'The math, the assumptions, the evidence, and the things this model cannot tell you.', documentTitle: 'How it works' },
   settings: { number: '07', eyebrow: 'SETTINGS / THE LOCKER ROOM', title: 'Set up your bench.', description: 'How COURTSIDE looks, how hard the simulator works, the NBA history saved on this computer, and how Coach answers.', documentTitle: 'Settings' },
@@ -96,8 +98,8 @@ const menuGroups: { id: string; title: string; links: MenuLink[] }[] = [
 ];
 
 const playbook: { title: string; plays: string[] }[] = [
-  { title: 'Build the slip', plays: ['Add Nikola Jokić over 45.5 PRA', 'Add Jamal Murray over 2.5 threes', 'Add Jokić double-double', 'Flip leg 2', 'Undo'] },
-  { title: 'Check the price', plays: ['Book has my parlay at +450, is that good?', 'Jokić over 26.5 points at -115?', 'Why are my legs linked?'] },
+  { title: 'Build the slip', plays: ['Add Nikola Jokić over 45.5 PRA', 'Add Jamal Murray over 2.5 threes', 'Add Jokić double-double', 'Add Celtics -5.5', 'Add Nuggets moneyline', 'Flip leg 2', 'Undo'] },
+  { title: 'Check the price', plays: ['Book has my parlay at +450, is that good?', 'Jokić over 26.5 points at -115?', 'Who wins Lakers vs Celtics?', 'Is Knicks +3.5 a good bet?', 'Why are my legs linked?'] },
   { title: 'Scout a player', plays: ['What’s SGA averaging?', 'How often has Jokić gone over 11.5 rebounds in his last 10 games?'] },
   { title: 'Keep score', plays: ['Track this for $10', 'Grade my tracked bets', 'Are you getting smarter?'] },
   { title: 'League & news', plays: ['Who’s injured on the Lakers?', 'Is LeBron James playing tonight?', 'Latest NBA news', 'What’s the spread for the Celtics game?', 'How do the Thunder play?', 'Who coaches the Warriors?', 'Which team plays the fastest?', 'Standings'] },
@@ -483,6 +485,16 @@ export default function App() {
     announce(`${outcome === 'added' ? 'Added' : 'Replaced the leg with'} ${description}. The slip has ${count} ${count === 1 ? 'leg' : 'legs'}.`);
     launchBall(origin, document.getElementById('parlay-slip-button'), () => setBounce(value => value + 1));
   }
+  function addGameLeg(request: GameLegRequest, label: LegLabel, origin: HTMLElement) {
+    const description = legDescription({ request, label });
+    const outcome = parlay.upsertLeg(request, label);
+    if (outcome === 'full') { announce(`The slip is full. Remove a leg before adding another; ${MAX_LEGS} legs is the maximum.`); return; }
+    if (outcome === 'unchanged') { announce(`${description} is already in the slip.`); return; }
+    const count = outcome === 'added' ? parlay.legs.length + 1 : parlay.legs.length;
+    announce(`${outcome === 'added' ? 'Added' : `Replaced this game's ${request.market} with`} ${description}. The slip has ${count} ${count === 1 ? 'leg' : 'legs'}.`);
+    launchBall(origin, document.getElementById('parlay-slip-button'), () => setBounce(value => value + 1));
+  }
+  const gameSlip: GameSlipActions = { legs: parlay.legs, full: parlay.full, onAdd: addGameLeg };
   function saveLine() {
     setPrefill(value => value + 1);
     goPlayers('lines', 'line-event-date');
@@ -686,13 +698,13 @@ export default function App() {
           </div>
         </section>
 
-        <section className="view-section" hidden={page !== 'parlay'} aria-label="Parlay"><ParlayView parlay={parlay} onForecast={() => goPlayers('props')} onTracked={onTracked} /></section>
+        <section className="view-section" hidden={page !== 'parlay'} aria-label="Parlay"><ParlayView parlay={parlay} onForecast={() => goPlayers('props')} onGames={() => go({ page: 'news', section: 'games', team: null })} onTracked={onTracked} /></section>
 
         <section className="view-section" hidden={page !== 'bets'} aria-label="My Bets"><MyBets active={page === 'bets'} version={ledgerVersion} learning={learning} onParlay={() => go({ page: 'parlay' })} onCoach={openCoach} /></section>
 
         <section className="view-section" hidden={page !== 'news'} aria-label="News">
           <SubNav items={newsTabs.map(tab => ({ ...tab, href: routeHash({ page: 'news', section: tab.id, team: null }) }))} active={newsSection} onNavigate={id => go({ page: 'news', section: id as NewsSection, team: null })} label="News sections" />
-          <NewsPage active={page === 'news'} section={newsSection} team={newsTeam} teams={newsTeams} />
+          <NewsPage active={page === 'news'} section={newsSection} team={newsTeam} teams={newsTeams} slip={gameSlip} />
         </section>
 
         {page === 'coach' && <section className="view-section coach-page" aria-label="Coach">

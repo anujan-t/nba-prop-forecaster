@@ -3,9 +3,11 @@ import type { InjuryEntry, Model, Stat } from './types';
 /** API contract for POST /api/parlay. Probabilities are 0–1 fractions. */
 
 export type Side = 'over' | 'under';
+export type GameMarket = 'moneyline' | 'spread';
 
-/** One leg: the same settings as a Forecast lab request (minus odds), plus the side being backed. */
+/** One prop leg: the same settings as a Forecast lab request (minus odds), plus the side being backed. */
 export interface ParlayLegRequest {
+  kind?: 'player'; // omitted by slips saved before moneylines and spreads
   dataset_id: string;
   player_id: string;
   stat: Stat;
@@ -19,8 +21,22 @@ export interface ParlayLegRequest {
   use_context: boolean;
 }
 
+/** A moneyline or point spread on one team in one game: ESPN's event id and the game's US Eastern date. */
+export interface GameLegRequest {
+  kind: 'game';
+  game_id: string;
+  date: string; // YYYY-MM-DD
+  team: string; // the team backed, e.g. "DEN"
+  opponent: string;
+  home: boolean; // whether `team` plays at home
+  market: GameMarket;
+  line: number | null; // the team's spread, negative when favored (whole or half point, ±60); null for a moneyline
+}
+
+export type AnyLegRequest = ParlayLegRequest | GameLegRequest;
+
 export interface ParlayRequest {
-  legs: ParlayLegRequest[]; // 1–10 legs; each player + stat pair may appear only once (422 otherwise)
+  legs: AnyLegRequest[]; // 1–10 legs; one per player + stat, one moneyline and one spread per game (422 otherwise)
   book_odds: number | null; // optional American odds offered for the whole parlay, e.g. 450 or -120
   simulations?: number; // games simulated per player for legs on the game simulator
 }
@@ -31,6 +47,7 @@ export interface FairOdds {
 }
 
 export interface ParlayLeg {
+  kind?: 'player';
   index: number; // 0-based, same order as the request
   player: { id: string; name: string; team: string };
   stat: Stat;
@@ -48,17 +65,64 @@ export interface ParlayLeg {
   injury?: InjuryEntry | null; // the player's entry on the last saved injury report
 }
 
-/** How two legs are linked. Players on different current teams are treated as independent. */
-export type PairBasis = 'same_player' | 'teammates' | 'independent';
+/** The book's listed price for one side of a game market, against the model. */
+export interface BookSide {
+  odds: number; // American
+  implied: number; // break-even probability, vig included
+  no_vig: number | null; // the book's own chance once the two sides' margin is removed
+  vig: number | null;
+  line: number | null; // the spread the price is for; null for a moneyline
+  provider: string | null;
+  model: number;
+  edge: number; // model chance (pushes excluded) minus break-even
+  expected_roi: number; // expected profit per 1 unit if the model is right; pushes refund
+  verdict: 'value' | 'fair' | 'house';
+}
+
+/** A moneyline or spread leg priced by the team model. */
+export interface GameParlayLeg {
+  kind: 'game';
+  index: number;
+  game_id: string;
+  date: string;
+  team: string;
+  opponent: string;
+  home: boolean;
+  market: GameMarket;
+  line: number | null;
+  probability: number; // P(leg wins)
+  push: number; // P(margin lands exactly on a whole-number spread)
+  fair_odds: FairOdds | null;
+  win_probability: number; // the team's chance to win the game
+  margin: number; // the team's expected margin, in points
+  sigma: number;
+  fair_spread: number; // the model's spread for the team, to the half point
+  back_to_back: boolean;
+  opponent_back_to_back: boolean;
+  rating: number; // points better than an average team on a neutral floor
+  opponent_rating: number;
+  home_court: number;
+  games: number; // games behind the ratings
+  as_of: string;
+  early_season: boolean; // fewer than 10 games this season for one of the teams
+  book: BookSide | null; // when the book lists this market at this line
+  state: 'pre' | 'in' | 'post' | null;
+}
+
+export type AnyParlayLeg = ParlayLeg | GameParlayLeg;
+
+/** How two legs are linked. Players on different current teams, and different games, are treated as independent. */
+export type PairBasis = 'same_player' | 'teammates' | 'same_game' | 'team_player' | 'independent';
 
 export interface ParlayPair {
   a: number; // leg index, a < b
   b: number;
   basis: PairBasis;
   games: number; // shared games used for the estimate (0 when independent)
-  rank_correlation: number | null; // Spearman correlation of the two stats over shared games
-  correlation: number; // latent correlation used in the joint model (after shrinkage), between the two stats; 0 if independent
-  source: 'simulation' | 'history' | 'none'; // simulation: same-player legs priced jointly from the same simulated games
+  rank_correlation: number | null; // Spearman correlation over shared games
+  correlation: number; // latent correlation used in the joint model (after shrinkage); 0 if independent
+  effect?: number; // the same correlation signed for the sides picked: positive means the legs tend to win together
+  source: 'simulation' | 'history' | 'model' | 'none'; // simulation: same-player legs; model: legs on the same game
   simulations: number | null;
   note: string; // one plain-English sentence
 }
@@ -72,7 +136,7 @@ export interface ParlayGroupHistory {
 }
 
 export interface ParlayResult {
-  legs: ParlayLeg[];
+  legs: AnyParlayLeg[];
   pairs: ParlayPair[]; // every pair of legs, a < b
   probability: number; // P(every leg wins), correlation-adjusted
   independent_probability: number; // product of leg probabilities

@@ -69,6 +69,14 @@ class CoachApiTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/ledger/{tracked.json()['id']}").status_code, 204)
         self.assertEqual(self.client.delete(f"/api/ledger/{tracked.json()['id']}").status_code, 404)
 
+    def test_re_adding_a_leg_from_the_returned_slip_changes_nothing(self):
+        slip = self.chat("add jokic over 26.5 points")["slip"]
+        again = self.chat("add jokic over 26.5 points", slip)  # the slip comes back with kind="player" filled in
+        self.assertEqual((again["actions"], again["slip"]), ([], None))
+        self.assertIn("already", again["reply"])
+        changed = self.chat("add jokic over 27.5 points", slip)
+        self.assertEqual([action["type"] for action in changed["actions"]], ["replace_leg"])
+
     def test_feedback_status_and_learning(self):
         reply = self.chat("help")
         self.assertEqual(self.client.post("/api/assistant/feedback", json={"turn_id": reply["turn_id"], "rating": 1, "note": None}).status_code, 200)

@@ -29,10 +29,28 @@ export default function Methodology() {
       <article className="card methodology-section"><SectionHeading eyebrow="05 / THE EVALUATION" title="Walk forward. Never peek."><FlaskConical size={21} className="subtle" /></SectionHeading><p>The first 15 games establish a warm-up history. For each later game, fit to older rows within the chosen lookback, estimate the over probability, and compare it with the held-out outcome. Pushes are excluded from binary scoring.</p><div className="formula-block"><code>Brier = mean((predicted − outcome)²)</code><code>Skill = 1 − model Brier / baseline Brier</code></div><p>Lower Brier and log loss are better. Calibration asks whether similar probability forecasts match their observed frequencies. Always inspect sample counts. Fixed scenario lines and adaptive prior-median half-point lines are <strong>not historical market lines</strong>; this is not a historical betting-profit simulation.</p><RouteLink className="text-button" to={{ page: 'how', section: 'accuracy' }} focus="backtest-title">Run a backtest in Accuracy <ArrowRight size={15} aria-hidden="true" /></RouteLink></article>
       <article className="card methodology-section"><SectionHeading eyebrow="06 / THE SOURCE & ITS LIMITS" title="NBA Stats is the starting point."><Database size={21} className="subtle" /></SectionHeading><p>Historical completed games come directly from the endpoints behind NBA.com through the community-maintained <code>nba_api</code> client. No API key or CSV upload is needed. Availability varies by player, season and statistical category.</p><p>Structured responses are stored as native records in a local SQLite cache. Load reuses history fetched within six hours; expired history is fetched again. Refresh always contacts NBA and updates the same history. NBA outages never silently produce fabricated or synthetic results.</p><p>The optional synthetic fixture is only for reproducible development, never evidence of real NBA accuracy. Source and retrieval time accompany forecasts. No live odds, injury updates or automatic market history are implied.</p><RouteLink className="text-button" to={{ page: 'settings', section: 'data' }}>Inspect saved NBA history in Settings › Data <ArrowRight size={15} aria-hidden="true" /></RouteLink></article>
     </div>
-    <article className="card methodology-section"><SectionHeading eyebrow="07 / PARLAY BUILDER" title="Every leg has to land."><Layers size={21} className="subtle" /></SectionHeading>
+    <article className="card methodology-section"><SectionHeading eyebrow="07 / MONEYLINES & SPREADS" title="Rate the teams. Price the margin."><Scale size={21} className="subtle" /></SectionHeading>
       <div className="two-column method-parlay">
         <div>
-          <p>Combine 1–10 legs, one per player and stat. Each leg is priced by exactly the same model and settings as Players › Props, and the parlay wins only if every leg wins.</p>
+          <p>Every completed game this season and last gives each team a rating: how many points better than an average team it is on a neutral floor. A game’s expected margin is home court plus the home rating minus the away rating, less a back-to-back penalty for a team that played the day before. Recent games count most (weights halve every 120 days; last season’s games count 0.3 as much).</p>
+          <div className="formula-block"><code>μ = HCA + r_home − r_away + b2b × (away B2B − home B2B)</code><code>Home margin ~ Normal(μ, 13 points), whole points, no ties</code><code>Moneyline wins when the team’s margin &gt; 0</code><code>Spread s covers when margin + s &gt; 0, pushes when = 0</code></div>
+          <p className="method-footnote">Walk-forward on 2023-24 to 2025-26 (3,680 games, each predicted only from earlier games): log loss 0.602 against 0.689 for always taking the home team, 66.7% of winners, and calibrated by decile. The book’s line knows about injuries and news the ratings don’t, so treat a big gap between the two as a reason to check the injury report, not as an edge.</p>
+        </div>
+        <div>
+          <ul className="method-rules">
+            <li><strong>Same game.</strong> A moneyline and a spread on one game are priced exactly from the same margin distribution: a team’s moneyline and −6.5 both win only when it wins by 7 or more. Legs that cannot both win are rejected.</li>
+            <li><strong>Player and team.</strong> A player’s prop and his game’s moneyline or spread are linked through how his stat moved with his team’s final margin in his recent games, with the same shrinkage as teammates.</li>
+            <li><strong>Grading.</strong> Tracked moneylines and spreads are graded from the final score as soon as the game is final; a postponed game is void.</li>
+          </ul>
+          <p>Not modeled: injuries, lineups and trades (each game card lists both teams’ injury reports), and totals. Until both teams have played 10 games, the ratings lean on last season.</p>
+          <RouteLink className="text-button" to={{ page: 'news', section: 'games', team: null }}>See tonight’s games <ArrowRight size={15} aria-hidden="true" /></RouteLink>
+        </div>
+      </div>
+    </article>
+    <article className="card methodology-section"><SectionHeading eyebrow="08 / PARLAY BUILDER" title="Every leg has to land."><Layers size={21} className="subtle" /></SectionHeading>
+      <div className="two-column method-parlay">
+        <div>
+          <p>Combine 1–10 legs: one per player and stat, and one moneyline and one spread per game. Each prop leg is priced by exactly the same model and settings as Players › Props, each game leg by the team model, and the parlay wins only if every leg wins.</p>
           <div className="formula-block"><code>Independent = p₁ × p₂ × … × pₙ</code><code>Same player (simulator) = share of simulated games where every leg wins</code><code>ρ = 2·sin(π·ρₛ/6) × n/(n + 10)</code><code>Fair decimal odds = 1 / joint</code></div>
           <p className="method-footnote">Same-player legs on the game simulator are counted together in the same simulated games, which scored better on 28,464 held-out pairs than the shared-games correlation. Teammates use ρ, from the Spearman rank correlation ρₛ of the two stats over n shared games, capped at ±0.95. The joint is the multivariate-normal orthant probability (Genz algorithm, fixed seed) with each simulated same-player block replaced by its exact simulated chance, so identical inputs always give the same answer.</p>
         </div>
@@ -40,7 +58,7 @@ export default function Methodology() {
           <ul className="method-rules">
             <li><strong>Same player.</strong> Priced jointly from the simulator's games: points and PRA, or threes and points, move together exactly as they do in the simulated box scores.</li>
             <li><strong>Teammates.</strong> Joined by a Gaussian copula fitted on shared recent games: each player’s last 30, or a longer lookback. Below 10 shared games, no link is assumed. Opposite sides flip the direction of a link.</li>
-            <li><strong>Independent legs.</strong> Players on different teams, even when they meet: head-to-head linkage is not modelled.</li>
+            <li><strong>Independent legs.</strong> Players on different teams, even when they meet (head-to-head linkage is not modelled), and legs on different games.</li>
             <li><strong>Pushes.</strong> A push counts as not winning. For whole-number lines, the chance that no leg loses (each wins or pushes) is shown separately. Returns against entered odds treat a push as a loss.</li>
             <li><strong>History check.</strong> How often all linked legs hit together in shared past games, beside the model’s figure: a sanity check, not a backtest.</li>
           </ul>
@@ -49,16 +67,16 @@ export default function Methodology() {
         </div>
       </div>
     </article>
-    <article className="card methodology-section"><SectionHeading eyebrow="08 / COACH & LEARNING" title="Ask in plain words. Every number is computed."><BrainCircuit size={21} className="subtle" /></SectionHeading>
+    <article className="card methodology-section"><SectionHeading eyebrow="09 / COACH & LEARNING" title="Ask in plain words. Every number is computed."><BrainCircuit size={21} className="subtle" /></SectionHeading>
       <div className="two-column method-parlay">
         <div>
-          <p><strong>Coach</strong>, the chat assistant, reads commands such as “add Jokić over 26.5 points”, “flip leg 2” or “book has it at +450” with a built-in parser wired to the same forecast and parlay code as the rest of COURTSIDE, so a change made in chat is the same change you could make by hand, and the slip stays in step.</p>
+          <p><strong>Coach</strong>, the chat assistant, reads commands such as “add Jokić over 26.5 points”, “add Celtics −5.5”, “flip leg 2” or “book has it at +450” with a built-in parser wired to the same forecast and parlay code as the rest of COURTSIDE, so a change made in chat is the same change you could make by hand, and the slip stays in step.</p>
           <p>An optional LLM, any OpenAI-compatible endpoint (OpenAI, Azure OpenAI v1, or a local Ollama or LM Studio model), can take the open-ended questions. It phrases the answer; every probability, price and average still comes from the app’s own tools, never from the language model.</p>
           <p className="method-footnote">Price checks compare the offered odds’ break-even probability with the model’s. Without entered odds, Coach assumes −110 on every leg priced as independent, and says so: that is a reference point, not a real book price.</p>
         </div>
         <div>
           <ul className="method-rules">
-            <li><strong>Graded results.</strong> Parlays you track are graded against final box scores; each leg becomes a labelled outcome beside the probability the model gave it.</li>
+            <li><strong>Graded results.</strong> Parlays you track are graded against final box scores and final scores; each leg becomes a labelled outcome beside the probability the model gave it. Only prop legs train the per-market calibration.</li>
             <li><strong>Calibration per market.</strong> Every market gets its own recalibration, fitted on its graded outcomes and shrunk toward a shared correction. Each market keeps whichever of its own correction, the shared one or the raw model did best on its most recent held-out quarter.</li>
             <li><strong>Memory.</strong> Coach remembers nicknames you teach it or confirm, and your thumbs up or down on its answers. You can make it forget a nickname at any time in Settings › Coach.</li>
           </ul>

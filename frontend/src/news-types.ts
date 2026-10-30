@@ -1,3 +1,4 @@
+import type { BookSide, FairOdds } from './parlay-types';
 import type { InjuryEntry } from './types';
 
 /** API contract for /api/news/*. Feeds are cached by the server; `stale` marks a saved copy shown because the provider failed. */
@@ -124,6 +125,42 @@ export interface Game {
   broadcast: string | null; // e.g. "NBA TV, ESPN"
   note: string | null; // e.g. "NBA Cup - Group Play"
   date?: string | null; // YYYY-MM-DD (US Eastern), on games looked up for a team
+  model?: GameModelView | null; // the team model's view, for games not yet started
+}
+
+/** One side of one market (moneyline, or the spread at the book's line) as the team model sees it. */
+export interface ModelSide {
+  probability: number;
+  push: number;
+  line?: number; // spreads only: the team's line
+  fair_odds: FairOdds | null;
+  book: BookSide | null;
+}
+
+/** COURTSIDE's team model on one scheduled game. Margins are the home team's; probabilities are 0–1. */
+export interface GameModelView {
+  home: string;
+  away: string;
+  date: string;
+  home_margin: number;
+  sigma: number;
+  home_win: number;
+  away_win: number;
+  fair_spread: { home: number; away: number };
+  home_b2b: boolean;
+  away_b2b: boolean;
+  ratings: { home: number; away: number };
+  hca: number;
+  b2b_penalty: number;
+  as_of: string;
+  games: number;
+  played: { home: number; away: number };
+  early_season: boolean;
+  stale: boolean;
+  markets: {
+    moneyline: Partial<Record<'home' | 'away', ModelSide>>;
+    spread: Partial<Record<'home' | 'away', ModelSide>>;
+  };
 }
 
 export interface GamesFeed extends Feed {
@@ -132,6 +169,7 @@ export interface GamesFeed extends Feed {
   games: Game[];
   /** Per team playing that day: players listed out, suspended, doubtful, questionable or day-to-day. */
   injuries: Record<string, InjuryEntry[]>;
+  model_error?: string | null; // why the team model could not price these games
 }
 
 export interface PlayerNews {

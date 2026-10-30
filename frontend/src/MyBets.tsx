@@ -6,7 +6,7 @@ import type { LegStatus, SettleResult, TrackRecord as RecordSummary, TrackedBet 
 import { BetStatusChip, CalibrationBadge, amount } from './ChatCards';
 import { CoachMark } from './ChatPanel';
 import { Busy, EmptyState, ErrorNotice, SectionHeading, StatCard } from './components';
-import { deleteBet, fetchLedger, focusAfterRemoval, legLine, legStatusNames, profitLabel, recordDetail, roiLabel, settleBets, signedUnits, timestampLabel, units } from './ledger';
+import { deleteBet, fetchLedger, focusAfterRemoval, legLine, legResult, legStatusNames, legWhere, profitLabel, recordDetail, roiLabel, settleBets, signedUnits, timestampLabel, units } from './ledger';
 import type { Ledger } from './ledger';
 import { americanLabel, chance } from './parlay';
 import { RouteLink } from './RouteLink';
@@ -53,8 +53,10 @@ function BetItem({ bet, confirming, deleting, error, onAsk, onCancel, onDelete }
     </div>
     <ol className="record-legs">{bet.legs.map((leg, index) => <li key={`${leg.player_id}-${leg.stat}-${index}`} className={`leg-${leg.status}`}>
       <span className="record-leg-mark">{legIcons[leg.status]}<span className="sr-only">{legStatusNames[leg.status]}:</span></span>
-      <span className="record-leg-line">{legLine(leg)}{leg.team && <small> · {leg.team}</small>}</span>
-      <span className="record-leg-result">{leg.actual !== null ? <>Actual <strong>{amount(leg.actual)}</strong></> : leg.status === 'void' ? 'Did not play' : leg.status === 'pending' ? 'Not graded' : legStatusNames[leg.status]}</span>
+      <span className="record-leg-line">{legLine(leg)}{legWhere(leg) && <small> · {legWhere(leg)}</small>}</span>
+      <span className="record-leg-result">{leg.actual !== null
+        ? leg.kind === 'game' ? <>Final <strong>{legResult(leg, amount)}</strong></> : <>Actual <strong>{amount(leg.actual)}</strong></>
+        : leg.status === 'void' ? (leg.kind === 'game' ? 'Postponed' : 'Did not play') : leg.status === 'pending' ? 'Not graded' : legStatusNames[leg.status]}</span>
       <span className="record-leg-p">Model {chance(leg.probability)}</span>
     </li>)}</ol>
     <dl className="record-bet-facts">

@@ -1,6 +1,6 @@
 import { api } from './api';
 import type { BetStatus, LearningStatus, LegStatus, SettleResult, TrackBetRequest, TrackRecord, TrackedBet, TrackedLeg } from './assistant-types';
-import { sideNames, statLabel } from './parlay';
+import { sideNames, spreadLabel, statLabel } from './parlay';
 
 export interface Ledger { bets: TrackedBet[]; record: TrackRecord }
 
@@ -32,8 +32,22 @@ export function roiLabel(roi: number | null): string {
   return `${percent > 0 ? '+' : percent < 0 ? '−' : ''}${Math.abs(percent).toFixed(1)}%`;
 }
 
-export function legLine(leg: Pick<TrackedLeg, 'player' | 'side' | 'line' | 'stat'>): string {
+export function legLine(leg: TrackedLeg): string {
+  if (leg.kind === 'game') return `${leg.player} ${leg.market === 'moneyline' ? 'moneyline' : spreadLabel(leg.line ?? 0)}`;
   return `${leg.player} ${sideNames[leg.side]} ${leg.line} ${statLabel(leg.stat)}`;
+}
+
+/** Where a tracked leg was played: the team for a prop, "DEN @ GSW" for a moneyline or spread. */
+export function legWhere(leg: TrackedLeg): string {
+  if (leg.kind !== 'game') return leg.team;
+  return leg.home ? `${leg.opponent} @ ${leg.team}` : `${leg.team} @ ${leg.opponent}`;
+}
+
+/** A graded leg's result: the stat for a prop, the team's final margin ("won by 4") for a moneyline or spread. */
+export function legResult(leg: TrackedLeg, amount: (value: number) => string): string | null {
+  if (leg.actual === null) return null;
+  if (leg.kind !== 'game') return amount(leg.actual);
+  return leg.actual > 0 ? `won by ${leg.actual}` : `lost by ${Math.abs(leg.actual)}`;
 }
 
 export function profitLabel(bet: TrackedBet): string {

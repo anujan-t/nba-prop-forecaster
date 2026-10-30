@@ -6,11 +6,13 @@ from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from backend import news
-from backend.assistant import Coach
+from backend.assistant import Coach, describe_leg, slip_key
 from backend.knowledge import KNOWLEDGE
 from backend.newsroom import Newsroom
+from backend.teams import GameModel
 from backend.topics import find_day, find_metric, find_teams, topics
 from test_assistant import PLAYERS, CoachTestCase, FakeLearning, fake_llm
+from test_teams import FakeFetch
 
 TODAY = date(2026, 10, 28)
 
@@ -268,6 +270,99 @@ class AppAndBettingQuestionTests(LeagueCoachTestCase):
                 self.assertNotIn("forecast", self.cards(reply))
                 self.assertNotIn("Stephen Curry", reply["reply"])
                 self.assertEqual(self.slip["legs"], [])
+
+
+class GameMarketCoachTests(LeagueCoachTestCase):
+    """Moneylines and spreads by chat: tonight's fixture is DEN at GSW, GSW −2.5 / ML −135, DEN +2.5 / ML +115."""
+
+    def setUp(self):
+        super().setUp()
+        self.coach.games = self.coach.desk.games = GameModel(MemoryStore(), today=lambda: TODAY, schedule=self.newsroom.scoreboard,
+                                                             fetch=FakeFetch())
+
+    def game_legs(self):
+        return [(leg["request"]["team"], leg["request"]["market"], leg["request"]["line"]) for leg in self.slip["legs"]
+                if leg["request"].get("kind") == "game"]
+
+    def test_a_moneyline_from_a_plain_sentence(self):
+        added = self.say("i want to bet on the nuggets moneyline too")
+        self.assertEqual(self.game_legs(), [("DEN", "moneyline", None)])
+        self.assertEqual(self.slip["legs"][0]["label"], {"player": "Denver Nuggets", "team": "DEN"})
+        self.assertIn("**Denver Nuggets moneyline** tonight at the Warriors", added["reply"])
+        self.assertIn("by the team model", added["reply"])
+        self.assertIn("the book's +115 needs 46.5%", added["reply"])
+        self.assertIn("Jamal Murray", added["reply"])
+        self.assertIn("parlay", self.cards(added))
+        self.assertEqual(added["actions"][0]["type"], "add_leg")
+
+    def test_a_spread_and_a_prop_in_one_message(self):
+        response = self.say("add warriors -2.5 and jokic over 26.5 points")
+        self.assertEqual(self.game_legs(), [("GSW", "spread", -2.5)])
+        self.assertEqual(self.legs(), [("Golden State Warriors", None, None, -2.5), ("Nikola Jokić", "points", "over", 26.5)])
+        parlay = next(card for card in response["cards"] if card["type"] == "parlay")
+        self.assertEqual(parlay["result"]["pairs"][0]["basis"], "team_player")
+
+    def legs(self):
+        return [(leg["label"]["player"], leg["request"].get("stat"), leg["request"].get("side"), leg["request"]["line"]) for leg in self.slip["legs"]]
+
+    def test_flip_change_and_remove_game_legs(self):
+        self.say("add nuggets +2.5")
+        self.assertEqual(self.game_legs(), [("DEN", "spread", 2.5)])
+        self.assertIn("Golden State Warriors −2.5", self.say("flip leg 1")["reply"])
+        self.assertEqual(self.game_legs(), [("GSW", "spread", -2.5)])
+        self.say("change leg 1 to 4.5")
+        self.assertEqual(self.game_legs(), [("GSW", "spread", -4.5)])
+        self.say("add jokic over 26.5 points")
+        removed = self.say("remove the warriors")
+        self.assertEqual(removed["actions"][0]["description"], "Removed leg 1: Golden State Warriors −4.5")
+        self.assertEqual(self.game_legs(), [])
+        self.assertIn("no Warriors leg", self.say("remove the warriors")["reply"])
+
+    def test_one_moneyline_per_game_and_contradictions_are_explained(self):
+        self.say("add nuggets moneyline")
+        replaced = self.say("add warriors moneyline")
+        self.assertIn("Replaced leg 1", replaced["reply"])
+        self.assertEqual(self.game_legs(), [("GSW", "moneyline", None)])
+        middle = self.say("add nuggets +1.5")
+        self.assertIn("All 2 legs hit", middle["reply"])
+        parlay = next(card for card in middle["cards"] if card["type"] == "parlay")["result"]
+        self.assertLess(parlay["probability"], parlay["independent_probability"] / 3)
+        self.say("remove leg 2")
+        conflict = self.say("add nuggets +0.5")
+        self.assertIn("can't both win", conflict["reply"])
+
+    def test_questions_leave_the_slip_alone(self):
+        spread = self.say("is nuggets +2.5 a good bet?")
+        self.assertIsNone(spread["slip"])
+        self.assertIn("**Denver Nuggets +2.5** tonight at the Warriors (7:30 PM ET): covers", spread["reply"])
+        self.assertIn("add Nuggets +2.5", spread["suggestions"])
+        who = self.say("who wins nuggets vs warriors?")
+        self.assertIsNone(who["slip"])
+        self.assertIn("COURTSIDE's team model: **Nuggets", who["reply"])
+        self.assertIsNotNone(who["cards"][0]["games"][0]["model"])
+        lines = self.say("what's the spread for the warriors game?")
+        self.assertIn("team model", lines["reply"])
+        self.assertNotIn("prices player props, not sides", lines["reply"])
+
+    def test_a_team_without_a_market_asks_which(self):
+        asked = self.say("add the nuggets")
+        options = asked["clarification"]["options"]
+        self.assertEqual([option["label"] for option in options], ["Moneyline", "Spread"])
+        self.say(options[1]["message"])
+        self.assertEqual(self.game_legs(), [("DEN", "spread", 2.5)])
+
+    def test_tracking_a_game_leg(self):
+        self.say("add nuggets moneyline")
+        self.say("track this for $10")
+        self.assertEqual(self.learning.tracked[0]["legs"][0]["request"]["kind"], "game")
+
+    def test_descriptions_and_slip_keys_cover_game_legs(self):
+        self.say("add warriors -2.5 and jokic over 26.5 points")
+        self.assertEqual([describe_leg(leg) for leg in self.slip["legs"]],
+                         ["Golden State Warriors −2.5", "Nikola Jokić Over 26.5 points"])
+        legs, odds = slip_key(self.slip)
+        self.assertEqual(legs[0], ("game", "1", "spread", "GSW", -2.5))
+        self.assertIsNone(odds)
 
 
 class LeagueToolTests(LeagueCoachTestCase):

@@ -9,9 +9,9 @@ import type {
 import { parseRichText } from './chat';
 import type { InlineRun } from './chat';
 import { ScoreboardDigits } from './components';
-import { betStatusNames, legLine, legStatusNames, legsDetail, profitLabel, recordDetail, roiLabel, signedUnits, units } from './ledger';
+import { betStatusNames, legLine, legResult, legStatusNames, legsDetail, profitLabel, recordDetail, roiLabel, signedUnits, units } from './ledger';
 import { allowedMetrics, dayLabel, GameCard, gameDayLabel, InjuryBadge, injuryCounts, kindShort, metricValue, newsTabs, ordinal, PlayerLink, TeamChip } from './NewsPage';
-import { americanLabel, chance, chanceDigits, decimalOdds, legNumber, sideNames, statLabel } from './parlay';
+import { americanLabel, chance, chanceDigits, decimalOdds, isGameLeg, legNumber, sideNames, spreadLabel, statLabel } from './parlay';
 import { GoContext, RouteLink } from './RouteLink';
 import type { Go } from './RouteLink';
 import { parseHash } from './routes';
@@ -149,11 +149,17 @@ function ParlayCardView({ card, onOpenParlay }: { card: ParlayCard; onOpenParlay
       </dl>
     </div>
     {calibration && <p className="chat-card-note"><BrainCircuit size={13} aria-hidden="true" /><span><strong>Calibrated {chance(calibration.probability)}.</strong> {calibration.note}</span></p>}
-    <ol className="chat-legs">{result.legs.map((leg, position) => <li key={leg.index} className={`side-${leg.side}`}>
-      <span className="chat-leg-no" aria-hidden="true">{legNumber(leg.index)}</span>
-      <span className="chat-leg-who"><span className="sr-only">Leg {leg.index + 1}: </span>{leg.player.name} <span className="chat-leg-pick">{sideNames[leg.side]} {leg.line} {statLabel(leg.stat)}</span></span>
-      <span className="chat-leg-p">{chance(leg.probability)}{calibration && typeof calibration.legs[position] === 'number' && <small>cal. {chance(calibration.legs[position])}</small>}</span>
-    </li>)}</ol>
+    <ol className="chat-legs">{result.legs.map((leg, position) => isGameLeg(leg)
+      ? <li key={leg.index} className="side-game">
+        <span className="chat-leg-no" aria-hidden="true">{legNumber(leg.index)}</span>
+        <span className="chat-leg-who"><span className="sr-only">Leg {leg.index + 1}: </span>{leg.team} <span className="chat-leg-pick">{leg.market === 'moneyline' ? 'moneyline' : spreadLabel(leg.line ?? 0)} {leg.home ? 'vs' : 'at'} {leg.opponent}</span></span>
+        <span className="chat-leg-p">{chance(leg.probability)}</span>
+      </li>
+      : <li key={leg.index} className={`side-${leg.side}`}>
+        <span className="chat-leg-no" aria-hidden="true">{legNumber(leg.index)}</span>
+        <span className="chat-leg-who"><span className="sr-only">Leg {leg.index + 1}: </span>{leg.player.name} <span className="chat-leg-pick">{sideNames[leg.side]} {leg.line} {statLabel(leg.stat)}</span></span>
+        <span className="chat-leg-p">{chance(leg.probability)}{calibration && typeof calibration.legs[position] === 'number' && <small>cal. {chance(calibration.legs[position])}</small>}</span>
+      </li>)}</ol>
     <HouseBlock house={house} />
     <OpenButton onClick={onOpenParlay}>Open Parlay view</OpenButton>
   </article>;
@@ -229,7 +235,7 @@ function BetCardView({ bet, onOpenRecord }: { bet: TrackedBet; onOpenRecord: () 
     <ol className="chat-legs">{bet.legs.map((leg, index) => <li key={`${leg.player_id}-${leg.stat}`} className={`side-${leg.side} leg-${leg.status}`}>
       <span className="chat-leg-no" aria-hidden="true">{legNumber(index)}</span>
       <span className="chat-leg-who"><span className="sr-only">Leg {index + 1}: </span>{legLine(leg)}</span>
-      <span className="chat-leg-p">{chance(leg.probability)}{leg.status !== 'pending' && <small>{legStatusNames[leg.status]}{leg.actual !== null ? ` · ${amount(leg.actual)}` : ''}</small>}</span>
+      <span className="chat-leg-p">{chance(leg.probability)}{leg.status !== 'pending' && <small>{legStatusNames[leg.status]}{leg.actual !== null ? ` · ${legResult(leg, amount)}` : ''}</small>}</span>
     </li>)}</ol>
     <dl className="chat-facts">
       <div><dt>Model, all legs</dt><dd>{chance(bet.probability)}</dd></div>

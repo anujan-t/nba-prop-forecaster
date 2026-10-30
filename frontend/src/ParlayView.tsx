@@ -4,9 +4,9 @@ import { edgePoints, pct, signed } from './api';
 import type { TrackedBet } from './assistant-types';
 import { CourtLines, ErrorNotice, Field, ScoreboardDigits, SectionHeading, SwishHoop } from './components';
 import { useCountUp } from './motion';
-import { MAX_LEGS, americanLabel, basisNames, chance, chanceDigits, decimalOdds, effectStrength, legNumber, liftSentence, pairEffect } from './parlay';
+import { MAX_LEGS, americanLabel, basisNames, chance, chanceDigits, decimalOdds, effectStrength, legKey, legNumber, liftSentence, pairEffect } from './parlay';
 import type { SlipLeg } from './parlay';
-import type { ParlayLegRequest, ParlayPair, ParlayResult } from './parlay-types';
+import type { AnyLegRequest, ParlayPair, ParlayResult } from './parlay-types';
 import { LegEditor, focusNearestLeg } from './ParlayLegs';
 import { TrackBetForm } from './TrackBet';
 import { computedLeg } from './useParlay';
@@ -72,7 +72,7 @@ function BookOdds({ parlay, data }: { parlay: ParlayState; data: ParlayResult | 
   </article>;
 }
 
-function Linkage({ data, requests, legs }: { data: ParlayResult; requests: ParlayLegRequest[]; legs: SlipLeg[] }) {
+function Linkage({ data, requests, legs }: { data: ParlayResult; requests: AnyLegRequest[]; legs: SlipLeg[] }) {
   const count = data.legs.length;
   const pairAt = (a: number, b: number): ParlayPair | undefined => data.pairs.find(pair => pair.a === a && pair.b === b);
   const linked = data.pairs.filter(pair => pair.basis !== 'independent');
@@ -80,7 +80,7 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
   const tone = (effect: number) => effect > 0.0001 ? 'together' : effect < -0.0001 ? 'against' : 'neutral';
   return <article className="card linkage-card">
     <SectionHeading eyebrow="HOW THE LEGS MOVE" title="Linked legs"><Link2 size={19} className="subtle" aria-hidden="true" /></SectionHeading>
-    <p className="card-intro">Same-player legs on the game simulator are priced together from the same simulated games, so their links are built in. Teammate legs share games, so they are linked through how they moved together. Players on different current teams are treated as independent.</p>
+    <p className="card-intro">Same-player legs on the game simulator are priced together from the same simulated games, so their links are built in. Teammate legs share games, so they are linked through how they moved together. A moneyline and a spread on the same game are priced exactly from the team model, and a player’s leg is linked to his game’s team leg through how his stat moved with his team’s margin. Different teams and different games are treated as independent.</p>
     <div className="table-scroll" tabIndex={0} role="region" aria-label="Leg correlation matrix"><table className="link-matrix">
       <caption className="sr-only">Correlation between legs, oriented by side: positive values mean the two legs tend to win together.</caption>
       <thead><tr><th scope="col"><span className="sr-only">Leg</span></th>{data.legs.slice(1).map(leg => <th scope="col" key={leg.index}>{legNumber(leg.index)}</th>)}</tr></thead>
@@ -93,7 +93,7 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
           const effect = pairEffect(pair, requests);
           const independentPair = pair.basis === 'independent';
           return <td key={column.index}><span className={`link-cell ${independentPair ? 'neutral' : tone(effect)} strength-${effectStrength(effect)}`} title={pair.note}>
-            {independentPair ? '·' : signed(effect, 2)}<span className="sr-only">, {basisNames[pair.basis]}{independentPair ? '' : pair.source === 'simulation' ? ', priced jointly from simulated games' : `, ${pair.games} shared games`}</span>
+            {independentPair ? '·' : signed(effect, 2)}<span className="sr-only">, {basisNames[pair.basis]}{independentPair ? '' : pair.source === 'simulation' ? ', priced jointly from simulated games' : pair.source === 'model' ? ', priced exactly from the team model' : `, ${pair.games} shared games`}</span>
           </span></td>;
         })}
       </tr>)}</tbody>
@@ -104,15 +104,17 @@ function Linkage({ data, requests, legs }: { data: ParlayResult; requests: Parla
       const first = legs[pair.a]?.label.player;
       const second = legs[pair.b]?.label.player;
       return <li key={`${pair.a}-${pair.b}`} className={tone(effect)}>
-        <div className="pair-head"><strong>{legList([pair.a, pair.b])}</strong><span className="pill">{basisNames[pair.basis]}</span>{pair.source === 'simulation' && <span className="pill accent-pill">Simulated together</span>}<span className="pair-strength">{effectStrength(effect) === 'none' ? 'negligible' : effectStrength(effect)} · {effect >= 0 ? 'together' : 'against'}</span></div>
+        <div className="pair-head"><strong>{legList([pair.a, pair.b])}</strong><span className="pill">{basisNames[pair.basis]}</span>{pair.source === 'simulation' && <span className="pill accent-pill">Simulated together</span>}{pair.source === 'model' && <span className="pill accent-pill">Same margin</span>}<span className="pair-strength">{effectStrength(effect) === 'none' ? 'negligible' : effectStrength(effect)} · {effect >= 0 ? 'together' : 'against'}</span></div>
         <p>{pair.note}</p>
         <span className="pair-stats">{pair.source === 'simulation' && pair.simulations
           ? <>joint from {pair.simulations.toLocaleString()} simulated games · implied correlation {signed(pair.correlation, 2)}{pair.rank_correlation !== null ? ` · ${pair.games} recent games ranked ${signed(pair.rank_correlation, 2)}` : ''}</>
-          : <>{pair.games} shared games · rank correlation {pair.rank_correlation === null ? 'N/A' : signed(pair.rank_correlation, 2)} · model uses {signed(pair.correlation, 2)}{Math.abs(effect - pair.correlation) > 0.0001 ? ` (${signed(effect, 2)} for these sides)` : ''}</>}</span>
+          : pair.source === 'model'
+            ? <>exact from the team model’s margin distribution · implied correlation {signed(effect, 2)}</>
+            : <>{pair.games} shared games · rank correlation {pair.rank_correlation === null ? 'N/A' : signed(pair.rank_correlation, 2)} · model uses {signed(pair.correlation, 2)}{Math.abs(effect - pair.correlation) > 0.0001 ? ` (${signed(effect, 2)} for these sides)` : ''}</>}</span>
         {first && second && <span className="sr-only">{first === second ? `Both legs are ${first}.` : `${first} and ${second}.`}</span>}
       </li>;
     })}</ul>}
-    {count > 1 && independent > 0 && <p className="field-hint">{independent === data.pairs.length ? 'Every pair' : `${independent} of ${data.pairs.length} pairs`} {independent === 1 ? 'is' : 'are'} treated as independent (different current teams).</p>}
+    {count > 1 && independent > 0 && <p className="field-hint">{independent === data.pairs.length ? 'Every pair' : `${independent} of ${data.pairs.length} pairs`} {independent === 1 ? 'is' : 'are'} treated as independent (different teams or games).</p>}
   </article>;
 }
 
@@ -135,7 +137,7 @@ function History({ data }: { data: ParlayResult }) {
   </article>;
 }
 
-export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: ParlayState; onForecast: () => void; onTracked: (bet: TrackedBet) => void }) {
+export default function ParlayView({ parlay, onForecast, onGames, onTracked }: { parlay: ParlayState; onForecast: () => void; onGames: () => void; onTracked: (bet: TrackedBet) => void }) {
   const { legs, result, stale, computing, error } = parlay;
   const data = result?.data ?? null;
   const calibration = data?.calibration ?? null;
@@ -149,11 +151,14 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
       <SwishHoop className="is-static" />
       <h3>Your slip is empty</h3>
       <ol className="parlay-steps">
-        <li><span>1</span>Run a forecast for any player in Players › Props.</li>
-        <li><span>2</span>Add its Over or Under as a leg. Up to {MAX_LEGS} legs, one per player and stat.</li>
-        <li><span>3</span>Come back here for the chance that every leg hits, with links between same-player and teammate legs.</li>
+        <li><span>1</span>Run a forecast for any player in Players › Props, or open News › Games for tonight’s moneylines and spreads.</li>
+        <li><span>2</span>Add a prop’s Over or Under, or a team’s moneyline or spread, as a leg. Up to {MAX_LEGS} legs.</li>
+        <li><span>3</span>Come back here for the chance that every leg hits, with links between same-player, teammate and same-game legs.</li>
       </ol>
-      <button type="button" className="primary-button" onClick={onForecast}>Go to Players <ArrowRight size={16} aria-hidden="true" /></button>
+      <div className="parlay-empty-actions">
+        <button type="button" className="primary-button" onClick={onForecast}>Go to Players <ArrowRight size={16} aria-hidden="true" /></button>
+        <button type="button" className="secondary-button" onClick={onGames}>Tonight’s games</button>
+      </div>
     </div> : <>
       <p className="sr-only" aria-live="polite">{fresh && data ? `All ${legs.length} legs hit: ${chance(data.probability)} model probability${data.fair_odds ? `, fair odds ${americanLabel(data.fair_odds.american)}` : ''}.` : ''}</p>
       {error && error.general.length > 0 && <ErrorNotice message={error.general.join(' ')} onRetry={parlay.retry} />}
@@ -175,9 +180,9 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
         <div className="section-heading"><div className="section-heading-copy"><span className="eyebrow"><CourtLines />THE LEGS</span><h2 id="parlay-legs-title">Leg by leg</h2></div><span className="pill">{legs.length} of {MAX_LEGS}</span></div>
         <ol className="leg-grid">{legs.map((leg, index) => {
           const computed = computedLeg(result, leg, index);
-          return <LegEditor key={`${leg.request.player_id}:${leg.request.stat}`} leg={leg} index={index} detailed computed={computed} computing={computing}
+          return <LegEditor key={legKey(leg.request)} leg={leg} index={index} detailed computed={computed} computing={computing}
             calibrated={computed && calibration ? calibration.legs[index] ?? null : null}
-            errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onRemove={removeLeg} />;
+            errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onTeam={parlay.setTeam} onRemove={removeLeg} />;
         })}</ol>
         {calibration && <p className="calibration-legend"><BrainCircuit size={14} aria-hidden="true" /><span>“cal.” is each leg after the learning loop’s calibration, based on {calibration.samples} graded predictions. It is on only because it beat the raw model on recent held-out games.</span></p>}
       </section>
@@ -185,7 +190,7 @@ export default function ParlayView({ parlay, onForecast, onTracked }: { parlay: 
         {data.legs.length > 1 && <Linkage data={data} requests={result.request.legs} legs={legs} />}
         {data.history.length > 0 && <History data={data} />}
         <article className="card method-card"><SectionHeading eyebrow="HOW IT’S CALCULATED" title="The method" /><p>{data.method}</p>
-          <p className="quiet-note"><Info size={14} aria-hidden="true" /><span>Each leg uses exactly the same model as Players › Props. A whole-number line can push; a push does not count as a win here.</span></p></article>
+          <p className="quiet-note"><Info size={14} aria-hidden="true" /><span>Each prop leg uses exactly the same model as Players › Props; moneylines and spreads use the team model shown on News › Games. A whole-number line can push; a push does not count as a win here.</span></p></article>
         {data.warnings.length > 0 && <div className="notice warning-notice" role="status"><TriangleAlert size={18} aria-hidden="true" /><div><strong>Keep the limitations in view</strong>{data.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       </div>}
     </>}

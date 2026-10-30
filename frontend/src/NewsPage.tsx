@@ -1,14 +1,23 @@
-import { ArrowLeft, ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Clapperboard, ClipboardList, ExternalLink, HeartPulse, Newspaper, RefreshCw, Repeat2, Search, Shield, Stethoscope, Tv, Users, X } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, CalendarDays, Check, ChevronLeft, ChevronRight, Clapperboard, ClipboardList, ExternalLink, HeartPulse, Newspaper, Plus, RefreshCw, Repeat2, Search, Shield, Stethoscope, Tv, Users, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { dateLabel, timeAgo, todayEastern } from './api';
+import { dateLabel, pct, timeAgo, todayEastern } from './api';
 import { Busy, EmptyState, ErrorNotice, SectionHeading } from './components';
-import type { CoachEntry, Feed, Game, GamesFeed, Headlines, InjuryReport, NewsArticle, NewsKind, PlayType, SeasonProfile, TeamDetail, TeamMetric, TeamProfile, TeamStyles, Transaction, Transactions } from './news-types';
-import { americanLabel } from './parlay';
+import type { CoachEntry, Feed, Game, GamesFeed, Headlines, InjuryReport, ModelSide, NewsArticle, NewsKind, PlayType, SeasonProfile, TeamDetail, TeamMetric, TeamProfile, TeamStyles, Transaction, Transactions } from './news-types';
+import { americanLabel, legKey, sameLeg, spreadLabel } from './parlay';
+import type { LegLabel, SlipLeg } from './parlay';
+import type { GameLegRequest } from './parlay-types';
 import { RouteLink } from './RouteLink';
 import type { NewsSection } from './routes';
 import type { InjuryEntry } from './types';
 import { useFeed } from './useFeed';
+
+/** What a game card needs to add moneylines and spreads to the parlay slip. */
+export interface GameSlipActions {
+  legs: SlipLeg[];
+  full: boolean;
+  onAdd: (request: GameLegRequest, label: LegLabel, origin: HTMLElement) => void;
+}
 
 export const kindNames: Record<NewsKind, string> = {
   injury: 'Injuries & availability', transaction: 'Roster moves', coaching: 'Coaches & front office', game: 'Games',
@@ -185,9 +194,7 @@ function localTipoff(start: string | null): string | null {
 }
 
 /** A point spread as "−1.5", "+3" or "PK". */
-export function spreadLine(value: number): string {
-  return value === 0 ? 'PK' : `${value > 0 ? '+' : '−'}${Math.abs(value)}`;
-}
+export const spreadLine = spreadLabel;
 
 function priceLabel(value: number | null): string | null {
   return value === null || !Number.isFinite(value) || value === 0 ? null : americanLabel(value);
@@ -247,9 +254,68 @@ function GameInjuries({ game, injuries }: { game: Game; injuries: Record<string,
   </details>)}</div>;
 }
 
+/** The model's chance for one side, with the book's break-even when it lists that market. */
+function ModelChance({ side }: { side: ModelSide }) {
+  const book = side.book;
+  const tone = book ? (book.edge > 0.01 ? 'positive' : book.edge < -0.01 ? 'negative' : '') : '';
+  return <span className="model-chance">
+    {side.line !== undefined && <span className="model-chance-line">{spreadLine(side.line)}</span>}
+    <strong>{pct(side.probability, 0)}</strong>
+    {book && <small className={tone}>needs {pct(book.implied, 0)}<span className="sr-only">, the book’s break-even at {americanLabel(book.odds)}</span></small>}
+  </span>;
+}
+
+function ModelAddButton({ request, label, probability, slip }: { request: GameLegRequest; label: LegLabel; probability: number; slip: GameSlipActions }) {
+  const index = slip.legs.findIndex(leg => legKey(leg.request) === legKey(request));
+  const existing = index >= 0 ? slip.legs[index] : null;
+  const text = request.market === 'moneyline' ? 'ML' : spreadLine(request.line ?? 0);
+  const what = `${label.player} ${request.market === 'moneyline' ? 'moneyline' : spreadLine(request.line ?? 0)}`;
+  if (existing && sameLeg(existing.request, request)) {
+    return <button type="button" className="game-add in-slip" aria-disabled="true" title={`Leg ${index + 1} in your slip`}>
+      <Check size={13} aria-hidden="true" />{text}<span className="sr-only">: {what} is leg {index + 1}</span></button>;
+  }
+  return <button type="button" className="game-add" disabled={!existing && slip.full}
+    aria-label={`${existing ? `Replace leg ${index + 1} with` : 'Add'} ${what}, model ${pct(probability)}`}
+    title={existing ? `Replaces leg ${index + 1}: one ${request.market} per game` : slip.full ? 'The slip is full' : `Add ${what}`}
+    onClick={event => slip.onAdd(request, label, event.currentTarget)}><Plus size={13} aria-hidden="true" />{text}</button>;
+}
+
+/** COURTSIDE's team model under a scheduled game: each team's chance to win and to cover the listed spread. */
+function GameModelBlock({ game, slip }: { game: Game; slip?: GameSlipActions }) {
+  const model = game.model;
+  if (!model) return null;
+  const day = gameDate(game) ?? model.date;
+  const favorite = model.home_margin >= 0 ? game.home : game.away;
+  const rows = [{ side: game.away, other: game.home, key: 'away' as const, home: false }, { side: game.home, other: game.away, key: 'home' as const, home: true }];
+  const tired = [model.away_b2b ? game.away.team : null, model.home_b2b ? game.home.team : null].filter(Boolean);
+  return <div className="game-model">
+    <p className="game-model-head"><strong>COURTSIDE model</strong><span>{favorite.team} by {Math.abs(model.home_margin).toFixed(1)}</span></p>
+    <table className="game-lines game-model-table">
+      <caption className="sr-only">Team model, {game.away.name} at {game.home.name}: chance to win and to cover the listed spread</caption>
+      <thead><tr><th scope="col"><span className="sr-only">Team</span></th><th scope="col">Win</th><th scope="col">Cover</th>{slip && <th scope="col"><span className="sr-only">Add to slip</span></th>}</tr></thead>
+      <tbody>{rows.map(row => {
+        const moneyline = model.markets.moneyline[row.key];
+        const spread = model.markets.spread[row.key];
+        const label = { player: row.side.name, team: row.side.team };
+        const base: GameLegRequest = { kind: 'game', game_id: game.id, date: day, team: row.side.team, opponent: row.other.team, home: row.home, market: 'moneyline', line: null };
+        return <tr key={row.key}>
+          <th scope="row">{row.side.team}</th>
+          <td>{moneyline ? <ModelChance side={moneyline} /> : '—'}</td>
+          <td>{spread ? <ModelChance side={spread} /> : '—'}</td>
+          {slip && <td className="game-model-add">
+            {moneyline && <ModelAddButton request={base} label={label} probability={moneyline.probability} slip={slip} />}
+            {spread && spread.line !== undefined && <ModelAddButton request={{ ...base, market: 'spread', line: spread.line }} label={label} probability={spread.probability} slip={slip} />}
+          </td>}
+        </tr>;
+      })}</tbody>
+    </table>
+    <p className="game-provider">Model line {game.home.team} {spreadLine(model.fair_spread.home)}{tired.length ? ` · back-to-back: ${tired.join(', ')}` : ''}{model.early_season ? ' · early season: ratings still lean on last season' : ''}</p>
+  </div>;
+}
+
 /** One game: away @ home with records, the tipoff, live score or final, the listed lines and, optionally, who's hurt. */
-export function GameCard({ game, injuries, compact = false, showDate = false, showProvider = true }: {
-  game: Game; injuries?: Record<string, InjuryEntry[]>; compact?: boolean; showDate?: boolean; showProvider?: boolean;
+export function GameCard({ game, injuries, compact = false, showDate = false, showProvider = true, slip }: {
+  game: Game; injuries?: Record<string, InjuryEntry[]>; compact?: boolean; showDate?: boolean; showProvider?: boolean; slip?: GameSlipActions;
 }) {
   const sides = [{ side: game.away, where: 'Away' }, { side: game.home, where: 'Home' }];
   const scored = game.state !== 'pre' && sides.some(({ side }) => side.score !== null);
@@ -270,12 +336,13 @@ export function GameCard({ game, injuries, compact = false, showDate = false, sh
       </li>;
     })}</ul>
     {game.state === 'pre' && (game.odds ? <GameLines game={game} showProvider={showProvider} /> : <p className="game-no-lines">No lines posted yet</p>)}
+    {game.state === 'pre' && game.model && <GameModelBlock game={game} slip={slip} />}
     {game.broadcast && <p className="game-broadcast"><Tv size={14} aria-hidden="true" /><span className="sr-only">On TV: </span>{game.broadcast}</p>}
     {injuries && <GameInjuries game={game} injuries={injuries} />}
   </article>;
 }
 
-function GamesSection({ active }: { active: boolean }) {
+function GamesSection({ active, slip }: { active: boolean; slip?: GameSlipActions }) {
   const [day, setDay] = useState<string | null>(null); // null: today, as the server counts it
   const feed = useFeed<GamesFeed>(day ? `/api/news/games?day=${day}` : '/api/news/games', active);
   const data = feed.data;
@@ -300,8 +367,9 @@ function GamesSection({ active }: { active: boolean }) {
     {feed.error && <ErrorNotice message={feed.error} onRetry={() => feed.refresh()} />}
     {!data && feed.loading && <Busy text="Checking the schedule…" />}
     {data && !games.length && <EmptyState title="No games on this date" icon={<CalendarDays size={30} />}>Try the previous or next day.</EmptyState>}
-    {games.length > 0 && <ul className="game-grid">{games.map(game => <li key={game.id}><GameCard game={game} injuries={data?.injuries} /></li>)}</ul>}
-    <p className="news-footnote">Lines are the sportsbook ESPN lists (e.g. DraftKings), shown for reference; COURTSIDE models player props, not sides or totals.</p>
+    {data?.model_error && games.some(game => game.state === 'pre') && <p className="notice warning-notice games-model-error" role="status">{data.model_error}</p>}
+    {games.length > 0 && <ul className="game-grid">{games.map(game => <li key={game.id}><GameCard game={game} injuries={data?.injuries} slip={slip} /></li>)}</ul>}
+    <p className="news-footnote">Lines are the sportsbook ESPN lists (e.g. DraftKings). The COURTSIDE model rates moneylines and spreads from every game this season and last, with home court and back-to-backs; it doesn’t adjust for injuries, and totals aren’t modeled. “Needs” is the book’s break-even, vig included.</p>
   </section>;
 }
 
@@ -466,16 +534,16 @@ function MovesList({ items }: { items: Transaction[] }) {
   </li>)}</ul>;
 }
 
-function NextGame({ game, team }: { game: Game; team: string }) {
+function NextGame({ game, team, slip }: { game: Game; team: string; slip?: GameSlipActions }) {
   const home = game.home.team === team;
   const opponent = home ? game.away : game.home;
   return <section className="card next-game" aria-labelledby="team-next-title">
     <SectionHeading id="team-next-title" eyebrow={game.state === 'in' ? 'LIVE NOW' : 'NEXT GAME'} title={`${home ? 'vs' : 'at'} ${opponent.name}`}><CalendarDays size={20} className="subtle" aria-hidden="true" /></SectionHeading>
-    <GameCard game={game} showDate />
+    <GameCard game={game} showDate slip={slip} />
   </section>;
 }
 
-function TeamDetailView({ code, active }: { code: string; active: boolean }) {
+function TeamDetailView({ code, active, slip }: { code: string; active: boolean; slip?: GameSlipActions }) {
   const feed = useFeed<TeamDetail>(`/api/news/teams/${code.toLowerCase()}`, active);
   const [season, setSeason] = useState<Season>('current');
   const data = feed.data;
@@ -497,7 +565,7 @@ function TeamDetailView({ code, active }: { code: string; active: boolean }) {
         <button type="button" className="text-button" onClick={() => feed.refresh(true)} aria-disabled={feed.loading || undefined}><RefreshCw size={14} aria-hidden="true" className={feed.loading ? 'spin' : ''} />Refresh</button>
       </section>
       {data.errors.length > 0 && <div className="notice warning-notice"><HeartPulse size={18} aria-hidden="true" /><div><strong>Some sections couldn't load</strong>{data.errors.map(error => <p key={error}>{error}</p>)}</div></div>}
-      {data.next_game && <NextGame game={data.next_game} team={data.team.abbreviation} />}
+      {data.next_game && <NextGame game={data.next_game} team={data.team.abbreviation} slip={slip} />}
       <div className="team-detail-grid">
         <section className="card" aria-labelledby="team-style-title">
           <SectionHeading id="team-style-title" eyebrow="HOW THEY PLAY" title="Playing style"><SeasonToggle season={season} onSeason={setSeason} label="Style season" /></SectionHeading>
@@ -569,16 +637,16 @@ export const newsTabs: { id: NewsSection; label: string; icon: ReactNode }[] = [
 ];
 
 /** The newsroom: every section loads its feed the first time it is opened, then keeps it until refreshed. */
-export default function NewsPage({ active, section, team, teams }: { active: boolean; section: NewsSection; team: string | null; teams: string[] }) {
+export default function NewsPage({ active, section, team, teams, slip }: { active: boolean; section: NewsSection; team: string | null; teams: string[]; slip?: GameSlipActions }) {
   const [visited, setVisited] = useState<Set<NewsSection>>(() => new Set());
   if (active && !visited.has(section)) setVisited(new Set(visited).add(section));
   const on = (id: NewsSection) => active && section === id;
   return <>
     <div className="page-panel" hidden={section !== 'headlines'}>{visited.has('headlines') && <HeadlinesSection active={on('headlines')} teams={teams} />}</div>
-    <div className="page-panel" hidden={section !== 'games'}>{visited.has('games') && <GamesSection active={on('games')} />}</div>
+    <div className="page-panel" hidden={section !== 'games'}>{visited.has('games') && <GamesSection active={on('games')} slip={slip} />}</div>
     <div className="page-panel" hidden={section !== 'injuries'}>{visited.has('injuries') && <InjuriesSection active={on('injuries')} />}</div>
     <div className="page-panel" hidden={section !== 'teams'}>
-      {visited.has('teams') && (team ? <TeamDetailView key={team} code={team} active={on('teams')} /> : <TeamsSection active={on('teams')} />)}
+      {visited.has('teams') && (team ? <TeamDetailView key={team} code={team} active={on('teams')} slip={slip} /> : <TeamsSection active={on('teams')} />)}
     </div>
     <div className="page-panel" hidden={section !== 'moves'}>{visited.has('moves') && <MovesSection active={on('moves')} teams={teams} />}</div>
   </>;

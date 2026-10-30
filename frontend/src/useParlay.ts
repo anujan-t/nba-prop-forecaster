@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, isAbort, messageOf } from './api';
-import { MAX_LEGS, SLIP_STORAGE_KEY, bookOddsText, legKey, loadSlip, parseBookOdds, parseParlayError, parseSlip, sameLeg, sanitizeLegs, saveSlip, validBookOdds } from './parlay';
+import { MAX_LEGS, SLIP_STORAGE_KEY, bookOddsText, flipGame, isGameRequest, legKey, loadSlip, normalizeSpread, parseBookOdds, parseParlayError, parseSlip, sameLeg, sanitizeLegs, saveSlip, validBookOdds } from './parlay';
 import type { LegLabel, ParlayError, SlipLeg } from './parlay';
-import type { ParlayLeg, ParlayLegRequest, ParlayRequest, ParlayResult, Side } from './parlay-types';
+import type { AnyLegRequest, AnyParlayLeg, ParlayRequest, ParlayResult, Side } from './parlay-types';
 
 export interface ParlayComputation { data: ParlayResult; request: ParlayRequest; key: string }
 export type UpsertOutcome = 'added' | 'replaced' | 'unchanged' | 'full';
@@ -20,16 +20,18 @@ export interface ParlayState {
   computing: boolean;
   error: ParlayError | null;
   retry: () => void;
-  upsertLeg: (request: ParlayLegRequest, label: LegLabel) => UpsertOutcome;
+  upsertLeg: (request: AnyLegRequest, label: LegLabel) => UpsertOutcome;
   replaceSlip: (slip: { legs: unknown[]; book_odds: unknown }) => ReplaceOutcome;
   setSide: (index: number, side: Side) => void;
   setLine: (index: number, line: number) => void;
+  /** Moves a moneyline or spread to the other team in its game. */
+  setTeam: (index: number, team: string) => void;
   removeLeg: (index: number) => void;
   clear: () => void;
 }
 
 /** The computed leg for a slip row, and whether it still matches the row's current settings. */
-export function computedLeg(result: ParlayComputation | null, leg: SlipLeg, index: number): { leg: ParlayLeg; fresh: boolean } | null {
+export function computedLeg(result: ParlayComputation | null, leg: SlipLeg, index: number): { leg: AnyParlayLeg; fresh: boolean } | null {
   const requested = result?.request.legs[index];
   const computed = result?.data.legs[index];
   if (!requested || !computed || legKey(requested) !== legKey(leg.request)) return null;
@@ -51,8 +53,13 @@ export function useParlay(simulations: number): ParlayState {
     [legs, odds.value, simulations],
   );
   const key = request ? JSON.stringify(request) : '';
+  const mounted = useRef(false);
 
-  useEffect(() => { saveSlip({ legs, bookOdds }); }, [legs, bookOdds]);
+  // Save only real changes: writing the just-loaded slip back on mount could overwrite a leg another tab added meanwhile.
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    saveSlip({ legs, bookOdds });
+  }, [legs, bookOdds]);
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -94,7 +101,7 @@ export function useParlay(simulations: number): ParlayState {
     // `request` is fully described by `key`; `attempt` re-runs the same request on retry.
   }, [key, attempt]);
 
-  const upsertLeg = useCallback((next: ParlayLegRequest, label: LegLabel): UpsertOutcome => {
+  const upsertLeg = useCallback((next: AnyLegRequest, label: LegLabel): UpsertOutcome => {
     const existing = legs.find(leg => legKey(leg.request) === legKey(next));
     if (existing && sameLeg(existing.request, next)) return 'unchanged';
     if (!existing && legs.length >= MAX_LEGS) return 'full';
@@ -107,8 +114,19 @@ export function useParlay(simulations: number): ParlayState {
     return existing ? 'replaced' : 'added';
   }, [legs]);
 
-  const patchLeg = useCallback((index: number, patch: Partial<Pick<ParlayLegRequest, 'side' | 'line'>>) => {
-    setLegs(current => current.map((leg, position) => position === index ? { ...leg, request: { ...leg.request, ...patch } } : leg));
+  const patchLeg = useCallback((index: number, patch: { side?: Side; line?: number }) => {
+    setLegs(current => current.map((leg, position) => {
+      if (position !== index) return leg;
+      if (!isGameRequest(leg.request)) return { ...leg, request: { ...leg.request, ...patch } };
+      if (patch.line === undefined || leg.request.market !== 'spread') return leg;
+      const line = normalizeSpread(patch.line);
+      return line === null ? leg : { ...leg, request: { ...leg.request, line } };
+    }));
+  }, []);
+
+  const setTeam = useCallback((index: number, team: string) => {
+    setLegs(current => current.map((leg, position) => position === index && isGameRequest(leg.request)
+      && leg.request.team !== team && leg.request.opponent === team ? flipGame(leg.request) : leg));
   }, []);
 
   /** Replaces the whole slip with the same rules as a stored slip; the debounced computation then runs as usual. */
@@ -138,6 +156,7 @@ export function useParlay(simulations: number): ParlayState {
     replaceSlip,
     setSide: useCallback((index: number, side: Side) => patchLeg(index, { side }), [patchLeg]),
     setLine: useCallback((index: number, line: number) => patchLeg(index, { line }), [patchLeg]),
+    setTeam,
     removeLeg: useCallback((index: number) => setLegs(current => current.filter((_, position) => position !== index)), []),
     clear: useCallback(() => setLegs([]), []),
   };

@@ -12,8 +12,11 @@ import pandas as pd
 from scipy.stats import multivariate_normal, norm, spearmanr
 
 from . import simulation
+from . import teams as team_math
 from .engine import american_probability, forecast, market_simulation, profit_per_unit
+from .nba import NBAUnavailableError
 from .stats import label as stat_label, with_stats
+from .teams import GameModelUnavailable
 
 MAX_LEGS = 10
 CORRELATION_WINDOW = 30  # most recent games per player used for correlations and shared-game history
@@ -118,13 +121,26 @@ def leg_label(number: int, name: str, stat: str) -> str:
     return f"Leg {number} ({name} {stat})"
 
 
+def game_label(number: int, leg: dict) -> str:
+    market = "moneyline" if leg["market"] == "moneyline" else f"{float(leg['line']):+g} spread"
+    return f"Leg {number} ({leg['team']} {market})"
+
+
+def is_game(leg: dict) -> bool:
+    return leg.get("kind") == "game"
+
+
 def calibrated(priced: list[dict], oriented: np.ndarray, calibrator, adjustment: float = 1.0) -> dict | None:
-    """Recalibrates each leg's chance of settling over with its market's learned correction (when one is on) and
-    re-joins them with the same links; ``adjustment`` carries the exact simulated same-player blocks."""
-    if calibrator is None:
+    """Recalibrates each prop leg's chance of settling over with its market's learned correction (when one is on) and
+    re-joins them with the same links; ``adjustment`` carries the exact same-player and same-game blocks. Moneyline and
+    spread legs keep the team model's chance (the learned corrections are for player props)."""
+    if calibrator is None or all(is_game(leg) for leg in priced):
         return None
     adjusted = []
     for leg in priced:
+        if is_game(leg):
+            adjusted.append(float(leg["probability"]))
+            continue
         loss = max(0.0, 1 - leg["probability"] - leg["push"])
         settled = leg["probability"] + loss
         if settled <= 1e-12:
@@ -138,26 +154,59 @@ def calibrated(priced: list[dict], oriented: np.ndarray, calibrator, adjustment:
     values = np.asarray(adjusted)
     joint = float(np.clip(orthant(adjusted, oriented) * adjustment, max(0.0, float(values.sum()) - (len(values) - 1)), float(values.min())))
     return {"probability": joint, "legs": adjusted, "samples": int(status.get("samples") or 0),
-            "note": (f"Each leg recalibrated with its own market's correction (learned from {int(status.get('samples') or 0):,} "
-                     "graded predictions across every market), then joined with the same links.")}
+            "note": (f"Each prop leg recalibrated with its own market's correction (learned from {int(status.get('samples') or 0):,} "
+                     "graded predictions across every market), then joined with the same links."
+                     + (" Moneyline and spread legs keep the team model's chance." if any(is_game(leg) for leg in priced) else ""))}
 
 
 def won(values: pd.Series, line: float, side: str) -> pd.Series:
     return values > line if side == "over" else values < line
 
 
+def strength(effect: float) -> str:
+    phrase = "tend to" if abs(effect) >= 0.3 else "lean toward"
+    return (f"these legs {phrase} {'win together' if effect > 0 else 'work against each other'}"
+            if abs(effect) >= 0.1 else "little linkage between these legs")
+
+
 def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], tuple[pd.DataFrame, dict]],
-                 calibrator=None, simulations: int | None = None) -> dict:
+                 calibrator=None, simulations: int | None = None, team_model=None) -> dict:
     if not 1 <= len(legs) <= MAX_LEGS:
         raise ValueError(f"A parlay needs 1 to {MAX_LEGS} legs.")
     if book_odds is not None:
         american_probability(book_odds)
+    if team_model is None and any(is_game(leg) for leg in legs):
+        raise ValueError("Moneyline and spread legs need the team model, which is not connected here.")
     runs = int(simulations or simulation.DEFAULT_SIMULATIONS)
     datasets: dict[str, tuple[pd.DataFrame, dict]] = {}
-    seen: dict[tuple[str, str], int] = {}
+    seen: dict[tuple, int] = {}
+    matchups: dict[str, tuple[int, tuple]] = {}
     priced, warnings = [], []
     simulated: list[simulation.Simulation | None] = []
+    pmfs: dict[int, np.ndarray] = {}
     for number, leg in enumerate(legs, start=1):
+        if is_game(leg):
+            key = ("game", str(leg["game_id"]), leg["market"])
+            if key in seen:
+                raise ValueError(f"{game_label(number, leg)}: leg {seen[key]} is already a {leg['market']} on this game. Two legs on the "
+                                 "same game and market are redundant or contradictory; edit or remove one of them.")
+            seen[key] = number
+            game = (frozenset((leg["team"], leg["opponent"])), str(leg["date"]))
+            first, known = matchups.setdefault(str(leg["game_id"]), (number, game))
+            if known != game:
+                raise ValueError(f"{game_label(number, leg)}: leg {first} names the same game with different teams or a different date.")
+            try:
+                quote = team_model.leg(leg)
+            except (GameModelUnavailable, NBAUnavailableError, ValueError) as exc:
+                raise ValueError(f"{game_label(number, leg)}: {exc}") from exc
+            pmfs[number - 1] = quote.pop("pmf")
+            for warning in quote.pop("warnings", []):
+                text = warning if warning == team_math.EARLY_NOTE else f"{game_label(number, leg)}: {warning}"
+                if text not in warnings:
+                    warnings.append(text)
+            priced.append({"index": number - 1, **quote})
+            simulated.append(None)
+            continue
         if leg["dataset_id"] not in datasets:
             try:
                 datasets[leg["dataset_id"]] = load(leg["dataset_id"])
@@ -173,7 +222,7 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
             raise ValueError(f"{leg_label(number, name, stat_label(leg['stat']).lower())}: leg {seen[key]} already uses this player and stat. "
                              "A second line on the same stat is redundant or contradictory; edit or remove one of them.")
         seen[key] = number
-        request = ({k: v for k, v in leg.items() if k != "side"}
+        request = ({k: v for k, v in leg.items() if k not in ("side", "kind")}
                    | {"odds_over": -110, "odds_under": -110, "compare": False, "simulations": runs})
         try:
             result = forecast(frame, info, request)
@@ -186,7 +235,7 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
         # Only whole-number lines can land exactly on the line; drop floating-point residue for half points.
         push = chances["push"] if float(leg["line"]).is_integer() else 0.0
         priced.append({
-            "index": number - 1, "player": result["player"], "stat": leg["stat"], "line": leg["line"], "side": leg["side"],
+            "index": number - 1, "kind": "player", "player": result["player"], "stat": leg["stat"], "line": leg["line"], "side": leg["side"],
             "model": leg["model"], "resolved_model": result["resolved_model"], "sample_size": result["sample_size"],
             "mean": result["summary"]["mean"], "probability": probability, "push": push,
             "hit_rate": {"hits": int(won(sample, leg["line"], leg["side"]).sum()), "games": len(sample)},
@@ -194,18 +243,27 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
         })
         warnings.extend(warning for warning in result["warnings"] if warning not in warnings)
 
+    player_legs = [index for index, leg in enumerate(legs) if not is_game(leg)]
     # Each player's recent games across every history used for their legs (one row per date).
     games: dict[str, pd.DataFrame] = {}
-    for leg in legs:
+    for index in player_legs:
+        leg = legs[index]
         frame, _ = datasets[leg["dataset_id"]]
-        markets = sorted({other["stat"] for other in legs if other["player_id"] == leg["player_id"]})
+        markets = sorted({other["stat"] for other in legs if not is_game(other) and other["player_id"] == leg["player_id"]})
         rows = with_stats(frame.loc[frame["player_id"] == leg["player_id"]], markets).loc[:, ["date", "team", *markets]]
         games[leg["player_id"]] = pd.concat([games.get(leg["player_id"]), rows]).drop_duplicates("date", keep="last").sort_values("date")
     window: dict[str, int] = {}
-    for leg in legs:
+    for index in player_legs:
+        leg = legs[index]
         window[leg["player_id"]] = max(window.get(leg["player_id"], CORRELATION_WINDOW), leg["lookback"])
     recent = {player: rows.tail(window[player]) for player, rows in games.items()}
     team = {player: str(rows.iloc[-1]["team"]) for player, rows in games.items()}
+    margins: dict[str, dict[str, float]] = {}
+
+    def team_margins(code: str) -> dict[str, float]:
+        if code not in margins:
+            margins[code] = team_model.team_margins(code) if team_model is not None else {}
+        return margins[code]
 
     def shared(players: list[str]) -> pd.DataFrame:
         """Recent games of one player, or recent games several players played together for their current team."""
@@ -229,25 +287,80 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
 
     size = len(legs)
     correlation = np.eye(size)
-    signs = np.array([-1.0 if leg["side"] == "over" else 1.0 for leg in legs])
-    pairs, linked = [], list(range(size))
+    # A leg "wins high" (over, or its team's margin) or "wins low" (under); the copula works on these orientations.
+    signs = np.array([-1.0 if is_game(leg) or leg["side"] == "over" else 1.0 for leg in legs])
+    pairs, linked, players_linked = [], list(range(size)), list(range(size))
 
-    def root(i: int) -> int:
-        while linked[i] != i:
-            linked[i] = linked[linked[i]]
-            i = linked[i]
+    def root(i: int, parents: list[int] = linked) -> int:
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
         return i
+
+    def matchup(leg: dict) -> str:
+        return f"{leg['team']} vs {leg['opponent']}"
+
+    def independent(a: int, b: int, note: str) -> dict:
+        return {"a": a, "b": b, "basis": "independent", "games": 0, "rank_correlation": None, "correlation": 0.0,
+                "source": "none", "simulations": None, "note": note}
+
+    def game_pair(a: int, b: int) -> dict:
+        first, second = legs[a], legs[b]
+        if is_game(first) and is_game(second):
+            if str(first["game_id"]) != str(second["game_id"]):
+                return independent(a, b, f"Different games ({matchup(first)} and {matchup(second)}): treated as independent.")
+            linked[root(a)] = root(b)
+            both = team_math.joint(pmfs[a], [first, second])
+            if both <= 1e-12:
+                raise ValueError(f"{game_label(a + 1, first)} and {game_label(b + 1, second)[0].lower()}{game_label(b + 1, second)[1:]} "
+                                 "can't both win: they back opposite results of the same game. Remove or change one of them.")
+            win = tetrachoric(priced[a]["probability"], priced[b]["probability"], both)
+            latent = float(signs[a] * signs[b] * win)
+            correlation[a, b] = correlation[b, a] = latent
+            return {"a": a, "b": b, "basis": "same_game", "games": 0, "rank_correlation": None, "correlation": latent, "source": "model",
+                    "simulations": None, "note": (f"Same game ({matchup(first)}): priced together from the team model's margin "
+                                                  f"distribution, both win in {both:.1%}; {strength(win)}.")}
+        player_index, game_index = (a, b) if is_game(second) else (b, a)
+        prop, game = legs[player_index], legs[game_index]
+        player = prop["player_id"]
+        name = priced[player_index]["player"]["name"]
+        code = team[player]
+        if code not in (game["team"], game["opponent"]):
+            return independent(a, b, f"{name} plays for {code}, not in {matchup(game)}: treated as independent.")
+        linked[root(a)] = root(b)
+        by_date = team_margins(code)
+        rows = recent[player][recent[player]["team"] == code]
+        x, y = [], []
+        for day, value in zip(rows["date"], rows[prop["stat"]]):
+            margin = by_date.get(str(day)[:10])
+            if margin is None or pd.isna(value):
+                continue
+            x.append(float(value))
+            y.append(float(margin if code == game["team"] else -margin))
+        rank, latent = latent_correlation(np.asarray(x), np.asarray(y))
+        correlation[a, b] = correlation[b, a] = latent
+        subject = f"{name} {stat_label(prop['stat']).lower()} and the {game['team']} margin"
+        if rank is None:
+            reason = (f"only {len(x)} recent games with a team result" if len(x) < MIN_SHARED_GAMES
+                      else "one of them did not vary over those games")
+            note = f"{subject}: {reason}, so no linkage is assumed."
+        else:
+            note = f"{subject}: rank correlation {rank:+.2f} over {len(x)} recent games; {strength(signs[a] * signs[b] * latent)}."
+        return {"a": a, "b": b, "basis": "team_player", "games": len(x), "rank_correlation": rank, "correlation": latent,
+                "source": "history", "simulations": None, "note": note}
 
     for a, b in combinations(range(size), 2):
         first, second = legs[a], legs[b]
+        if is_game(first) or is_game(second):
+            pairs.append(game_pair(a, b))
+            continue
         pa, pb = first["player_id"], second["player_id"]
         same = pa == pb
         if not same and team[pa] != team[pb]:
-            pairs.append({"a": a, "b": b, "basis": "independent", "games": 0, "rank_correlation": None, "correlation": 0.0,
-                          "source": "none", "simulations": None,
-                          "note": f"Different teams ({team[pa]} and {team[pb]}): treated as independent."})
+            pairs.append(independent(a, b, f"Different teams ({team[pa]} and {team[pb]}): treated as independent."))
             continue
         linked[root(a)] = root(b)
+        players_linked[root(a, players_linked)] = root(b, players_linked)
         dates = shared([pa, pb])
         x, y = values(pa, first["stat"], dates), values(pb, second["stat"], dates)
         known = ~(np.isnan(x) | np.isnan(y))
@@ -259,14 +372,11 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
             win = tetrachoric(priced[a]["probability"], priced[b]["probability"], joint)
             latent = float(signs[a] * signs[b] * win)
             correlation[a, b] = correlation[b, a] = latent
-            strength = "tend to" if abs(win) >= 0.3 else "lean toward"
-            tendency = (f"these legs {strength} {'win together' if win > 0 else 'work against each other'}"
-                        if abs(win) >= 0.1 else "little linkage between these legs")
             history_note = f" (rank correlation {rank:+.2f} over {len(dates)} recent games)" if rank is not None else ""
             pairs.append({"a": a, "b": b, "basis": "same_player", "games": int(len(dates)), "rank_correlation": rank,
                           "correlation": latent, "source": "simulation", "simulations": simulated[a].size,
                           "note": f"{subject}: priced jointly from {simulated[a].size:,} simulated games, both win in "
-                                  f"{joint:.1%}; {tendency}{history_note}."})
+                                  f"{joint:.1%}; {strength(win)}{history_note}."})
             continue
         correlation[a, b] = correlation[b, a] = latent
         if rank is None:
@@ -274,46 +384,52 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
                       else "one of the stats did not vary over the shared games")
             note = f"{subject}: {reason}, so no linkage is assumed."
         else:
-            effect = signs[a] * signs[b] * latent
-            strength = "tend to" if abs(effect) >= 0.3 else "lean toward"
-            tendency = (f"these legs {strength} {'win together' if effect > 0 else 'work against each other'}"
-                        if abs(effect) >= 0.1 else "little linkage between these legs")
-            note = f"{subject}: rank correlation {rank:+.2f} over {len(dates)} shared games; {tendency}."
+            note = f"{subject}: rank correlation {rank:+.2f} over {len(dates)} shared games; {strength(signs[a] * signs[b] * latent)}."
         pairs.append({"a": a, "b": b, "basis": "same_player" if same else "teammates", "games": int(len(dates)),
                       "rank_correlation": rank, "correlation": latent, "source": "history", "simulations": None, "note": note})
 
     correlation, repaired = valid_correlation(correlation)
     oriented = correlation * np.outer(signs, signs)
+    for pair in pairs:
+        pair["effect"] = float(oriented[pair["a"], pair["b"]])
     p = [leg["probability"] for leg in priced]
     pushes = [leg["push"] for leg in priced]
     not_losing = [min(1.0, hit + push) for hit, push in zip(p, pushes)]
-    # Same-player legs on one simulation are priced exactly from its games; the copula carries links between blocks.
-    blocks: dict[int, list[int]] = {}
+    # Same-player legs on one simulation and legs on the same game are priced exactly; the copula links the blocks.
+    blocks: dict[tuple, list[int]] = {}
     for index, simulated_games in enumerate(simulated):
         if simulated_games is not None:
-            blocks.setdefault(id(simulated_games), []).append(index)
+            blocks.setdefault(("simulation", id(simulated_games)), []).append(index)
+    for index, leg in enumerate(legs):
+        if is_game(leg):
+            blocks.setdefault(("game", str(leg["game_id"])), []).append(index)
     blocks = {key: members for key, members in blocks.items() if len(members) > 1}
+
+    def exact(key: tuple, members: list[int], pushes_count: bool) -> float:
+        if key[0] == "game":
+            return team_math.joint(pmfs[members[0]], [legs[i] for i in members], pushes_count)
+        return float(np.mean(np.logical_and.reduce([draws(i, pushes_count) for i in members])))
 
     def joint_probability(chances: list[float], pushes_count: bool) -> float:
         value = orthant(chances, oriented)
-        for members in blocks.values():
-            exact = float(np.mean(np.logical_and.reduce([draws(i, pushes_count) for i in members])))
+        for key, members in blocks.items():
+            known = exact(key, members, pushes_count)
             approximate = orthant([chances[i] for i in members], oriented[np.ix_(members, members)])
             if approximate > 0:
-                value *= exact / approximate
-            elif exact == 0:
+                value *= known / approximate
+            elif known == 0:
                 value = 0.0
         chances_array = np.asarray(chances, dtype=float)
         return float(np.clip(value, max(0.0, float(chances_array.sum()) - (len(chances) - 1)), float(chances_array.min())))
 
     probability = joint_probability(p, False)
-    independent = float(np.prod(p))
+    independent_probability = float(np.prod(p))
     no_loss = joint_probability(not_losing, True) if max(pushes) > 0 else None
 
     history = []
     groups: dict[int, list[int]] = {}
-    for index in range(size):
-        groups.setdefault(root(index), []).append(index)
+    for index in player_legs:
+        groups.setdefault(root(index, players_linked), []).append(index)
     for members in groups.values():
         if len(members) < 2:
             continue
@@ -339,30 +455,40 @@ def price_parlay(legs: list[dict], book_odds: int | None, load: Callable[[str], 
     copula = orthant(p, oriented)
     calibration = calibrated(priced, oriented, calibrator, probability / copula if copula > 0 else 1.0)
 
-    if any(pair["basis"] == "independent" for pair in pairs):
+    game_legs = len(legs) - len(player_legs)
+    if any(pair["basis"] == "independent" and not is_game(legs[pair["a"]]) and not is_game(legs[pair["b"]]) for pair in pairs):
         warnings.append("Legs for players on different teams are treated as independent. If those players meet in the same game, "
                         "shared pace and score can make them move together.")
     if any(pair["source"] == "history" for pair in pairs):
         warnings.append("Linked-leg correlations come from each player's recent shared games (the last 30, or a longer lookback) "
                         "and are estimates, not guarantees.")
+    if game_legs:
+        warnings.append("Moneyline and spread legs come from COURTSIDE's team ratings (every game this season and last, home court "
+                        "and back-to-backs). They don't adjust for injuries or lineup news, so check who's out.")
     if repaired:
         warnings.append("The estimated correlations were adjusted slightly so they form a valid joint model.")
     if max(pushes) > 0:
         warnings.append("Whole-number lines can push. The parlay probability counts a push as not winning, and the expected return "
                         "treats it as a loss; sportsbooks usually shorten the parlay instead.")
     simulated_legs = sum(item is not None for item in simulated)
+    method = ("Each prop leg uses the same model as the player's Props view"
+              + (f"; {simulated_legs} {'leg comes' if simulated_legs == 1 else 'legs come'} from {runs:,} simulated games. " if simulated_legs else ". ")
+              + "Legs for the same player on the game simulator are priced jointly from the same simulated games, so "
+              "their links are exact under the model. Other same-player legs and current teammates are linked with a "
+              "Gaussian copula: rank correlations from shared recent games are converted to the latent scale "
+              "(2·sin(πρ/6)) and shrunk toward zero by n/(n+10). Legs for players on different teams are independent. ")
+    if game_legs:
+        method += ("Moneyline and spread legs come from the team model: each game's margin is Normal(model margin, 13 points) on "
+                   "whole points with no ties, so legs on the same game are priced exactly together, and a player's leg is linked to "
+                   "his game's team leg through how his stat moved with his team's margin in recent games. ")
+    method += ("The chance that every leg wins is the multivariate normal orthant probability (Genz algorithm), with each "
+               "exact block (same-player simulations, same-game legs) replaced by its exact chance.")
     return {
-        "legs": priced, "pairs": pairs, "probability": probability, "independent_probability": independent,
-        "correlation_lift": probability / independent if independent > 0 else None,
+        "legs": priced, "pairs": pairs, "probability": probability, "independent_probability": independent_probability,
+        "correlation_lift": probability / independent_probability if independent_probability > 0 else None,
         "no_loss_probability": no_loss, "fair_odds": fair_odds(probability), "book": book, "history": history,
-        "calibration": calibration, "simulations": runs if simulated_legs else None,
-        "method": ("Each leg uses the same model as the player's Props view"
-                   + (f"; {simulated_legs} {'leg comes' if simulated_legs == 1 else 'legs come'} from {runs:,} simulated games. " if simulated_legs else ". ")
-                   + "Legs for the same player on the game simulator are priced jointly from the same simulated games, so "
-                   "their links are exact under the model. Other same-player legs and current teammates are linked with a "
-                   "Gaussian copula: rank correlations from shared recent games are converted to the latent scale "
-                   "(2·sin(πρ/6)) and shrunk toward zero by n/(n+10). Legs for players on different teams are independent. "
-                   "The chance that every leg wins is the multivariate normal orthant probability (Genz algorithm), with "
-                   "each simulated same-player block replaced by its exact simulated chance."),
+        "calibration": calibration, "simulations": runs if simulated_legs else None, "method": method,
         "warnings": warnings, "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
+
+

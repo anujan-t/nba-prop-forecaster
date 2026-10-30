@@ -1,20 +1,40 @@
 import { isMilestone, modelNames, odds, statNames } from './api';
 import type { ChatSlip } from './assistant-types';
-import type { ParlayLegRequest, ParlayPair, ParlayResult, Side } from './parlay-types';
+import type { AnyLegRequest, AnyParlayLeg, GameLegRequest, GameParlayLeg, ParlayLegRequest, ParlayPair, ParlayResult, Side } from './parlay-types';
 import type { AppliedForecast, Model, Stat } from './types';
 
 export const MAX_LEGS = 10;
+export const MAX_SPREAD = 60;
 export const SLIP_STORAGE_KEY = 'courtside.parlay-slip.v1';
 
 export interface LegLabel { player: string; team: string }
-export interface SlipLeg { request: ParlayLegRequest; label: LegLabel }
+export interface SlipLeg { request: AnyLegRequest; label: LegLabel }
 export interface SlipState { legs: SlipLeg[]; bookOdds: string }
 export interface ParlayError { general: string[]; legs: Record<number, string[]> }
 
 export const sideNames: Record<Side, string> = { over: 'Over', under: 'Under' };
 
-export function legKey(leg: Pick<ParlayLegRequest, 'player_id' | 'stat'>): string {
-  return `${leg.player_id}:${leg.stat}`;
+/** Full team names, for a moneyline or spread flipped to the other team. */
+export const teamNames: Record<string, string> = {
+  ATL: 'Atlanta Hawks', BOS: 'Boston Celtics', BKN: 'Brooklyn Nets', CHA: 'Charlotte Hornets', CHI: 'Chicago Bulls',
+  CLE: 'Cleveland Cavaliers', DAL: 'Dallas Mavericks', DEN: 'Denver Nuggets', DET: 'Detroit Pistons', GSW: 'Golden State Warriors',
+  HOU: 'Houston Rockets', IND: 'Indiana Pacers', LAC: 'Los Angeles Clippers', LAL: 'Los Angeles Lakers', MEM: 'Memphis Grizzlies',
+  MIA: 'Miami Heat', MIL: 'Milwaukee Bucks', MIN: 'Minnesota Timberwolves', NOP: 'New Orleans Pelicans', NYK: 'New York Knicks',
+  OKC: 'Oklahoma City Thunder', ORL: 'Orlando Magic', PHI: 'Philadelphia 76ers', PHX: 'Phoenix Suns', POR: 'Portland Trail Blazers',
+  SAC: 'Sacramento Kings', SAS: 'San Antonio Spurs', TOR: 'Toronto Raptors', UTA: 'Utah Jazz', WAS: 'Washington Wizards',
+};
+
+export function isGameRequest(request: AnyLegRequest | Pick<ParlayLegRequest, 'player_id' | 'stat'>): request is GameLegRequest {
+  return (request as GameLegRequest).kind === 'game';
+}
+
+export function isGameLeg(leg: AnyParlayLeg): leg is GameParlayLeg {
+  return leg.kind === 'game';
+}
+
+/** One leg per player and stat, and one moneyline and one spread per game. */
+export function legKey(leg: AnyLegRequest | Pick<ParlayLegRequest, 'player_id' | 'stat'>): string {
+  return isGameRequest(leg) ? `game:${leg.game_id}:${leg.market}` : `${leg.player_id}:${leg.stat}`;
 }
 
 export function legNumber(index: number): string {
@@ -31,7 +51,11 @@ export function legFromForecast(applied: AppliedForecast, side: Side): ParlayLeg
   };
 }
 
-export function sameLeg(a: ParlayLegRequest, b: ParlayLegRequest): boolean {
+export function sameLeg(a: AnyLegRequest, b: AnyLegRequest): boolean {
+  if (isGameRequest(a) || isGameRequest(b)) {
+    return isGameRequest(a) && isGameRequest(b) && a.game_id === b.game_id && a.date === b.date && a.team === b.team
+      && a.opponent === b.opponent && a.home === b.home && a.market === b.market && a.line === b.line;
+  }
   return a.dataset_id === b.dataset_id && a.player_id === b.player_id && a.stat === b.stat && a.line === b.line
     && a.side === b.side && a.model === b.model && a.lookback === b.lookback && a.expected_minutes === b.expected_minutes
     && a.rest_days === b.rest_days && a.opponent === b.opponent && a.use_context === b.use_context;
@@ -43,14 +67,39 @@ export function normalizeLine(value: number): number | null {
   return Math.min(200, Math.max(0, Math.round(value * 2) / 2));
 }
 
+/** A point spread to the half point, clamped to ±60; null when the input is not a number. */
+export function normalizeSpread(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  return Math.min(MAX_SPREAD, Math.max(-MAX_SPREAD, Math.round(value * 2) / 2)) || 0;
+}
+
+/** A point spread as "−1.5", "+3" or "PK". */
+export function spreadLabel(value: number): string {
+  return value === 0 ? 'PK' : `${value > 0 ? '+' : '−'}${Math.abs(value)}`;
+}
+
+/** "Moneyline" or "Spread +2.5". */
+export function marketLabel(request: GameLegRequest): string {
+  return request.market === 'moneyline' ? 'Moneyline' : `Spread ${spreadLabel(request.line ?? 0)}`;
+}
+
+/** The same market on the other team: a moneyline switches sides, a spread switches sides and sign (−2.5 becomes +2.5). */
+export function flipGame(request: GameLegRequest): SlipLeg {
+  const next: GameLegRequest = { ...request, team: request.opponent, opponent: request.team, home: !request.home,
+    line: request.line === null ? null : -request.line || 0 };
+  return { request: next, label: { player: teamNames[next.team] ?? next.team, team: next.team } };
+}
+
 export function statLabel(stat: Stat): string {
   const name = statNames[stat];
   return name.includes('+') ? name : name.toLocaleLowerCase();
 }
 
 export function legDescription(leg: SlipLeg): string {
-  if (isMilestone(leg.request.stat)) return `${leg.label.player} ${leg.request.side === 'over' ? 'to get a' : 'no'} ${statLabel(leg.request.stat)}`;
-  return `${leg.label.player} ${sideNames[leg.request.side]} ${leg.request.line} ${statLabel(leg.request.stat)}`;
+  const request = leg.request;
+  if (isGameRequest(request)) return `${leg.label.player} ${request.market === 'moneyline' ? 'moneyline' : spreadLabel(request.line ?? 0)}`;
+  if (isMilestone(request.stat)) return `${leg.label.player} ${request.side === 'over' ? 'to get a' : 'no'} ${statLabel(request.stat)}`;
+  return `${leg.label.player} ${sideNames[request.side]} ${request.line} ${statLabel(request.stat)}`;
 }
 
 export function parseBookOdds(text: string): { value: number | null; error: string } {
@@ -128,10 +177,11 @@ export function parseParlayError(message: string, legCount: number): ParlayError
 }
 
 /** Correlation as it affects the parlay: positive means the two legs tend to win together. */
-export function pairEffect(pair: ParlayPair, legs: ParlayLegRequest[]): number {
+export function pairEffect(pair: ParlayPair, legs: AnyLegRequest[]): number {
+  if (typeof pair.effect === 'number') return pair.effect;
   const a = legs[pair.a];
   const b = legs[pair.b];
-  if (!a || !b) return pair.correlation;
+  if (!a || !b || isGameRequest(a) || isGameRequest(b)) return pair.correlation;
   return (a.side === b.side ? 1 : -1) * pair.correlation;
 }
 
@@ -141,7 +191,7 @@ export function effectStrength(effect: number): 'none' | 'weak' | 'moderate' | '
 }
 
 export const basisNames: Record<ParlayPair['basis'], string> = {
-  same_player: 'Same player', teammates: 'Teammates', independent: 'Independent',
+  same_player: 'Same player', teammates: 'Teammates', same_game: 'Same game', team_player: 'Player & team', independent: 'Independent',
 };
 
 export function liftSentence(result: ParlayResult): string {
@@ -169,9 +219,25 @@ function nullableNumber(value: unknown, integer = false): number | null | undefi
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!integer || Number.isInteger(value)) ? value : undefined;
 }
 
+function sanitizeGameLeg(request: Record<string, unknown>, label: Record<string, unknown>): SlipLeg | null {
+  const code = (item: unknown) => typeof item === 'string' && /^[A-Z]{2,4}$/.test(item) ? item : null;
+  const gameId = typeof request.game_id === 'string' && /^\d{1,20}$/.test(request.game_id) ? request.game_id : null;
+  const date = typeof request.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(request.date) ? request.date : null;
+  const team = code(request.team);
+  const opponent = code(request.opponent);
+  const market = request.market === 'moneyline' || request.market === 'spread' ? request.market : null;
+  const home = typeof request.home === 'boolean' ? request.home : null;
+  const line = market === 'spread' && typeof request.line === 'number' ? normalizeSpread(request.line) : null;
+  if (!gameId || !date || !team || !opponent || team === opponent || !market || home === null || (market === 'spread' && line === null)) return null;
+  const player = typeof label.player === 'string' && label.player.trim() ? label.player.slice(0, 120) : teamNames[team] ?? team;
+  return { request: { kind: 'game', game_id: gameId, date, team, opponent, home, market, line: market === 'spread' ? line : null }, label: { player, team } };
+}
+
 export function sanitizeLeg(value: unknown): SlipLeg | null {
   if (!isRecord(value) || !isRecord(value.request) || !isRecord(value.label)) return null;
   const request = value.request;
+  if (request.kind === 'game') return sanitizeGameLeg(request, value.label);
+  if (request.kind !== undefined && request.kind !== 'player') return null;
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 120 ? item : null;
   const datasetId = text(request.dataset_id);
   const playerId = text(request.player_id);
@@ -197,7 +263,7 @@ export function sanitizeLeg(value: unknown): SlipLeg | null {
   };
 }
 
-/** Sanitizes each leg, keeps the first leg for each player + stat and caps the slip at MAX_LEGS. */
+/** Sanitizes each leg, keeps the first leg for each player + stat (and each game's market) and caps the slip at MAX_LEGS. */
 export function sanitizeLegs(items: unknown[]): { legs: SlipLeg[]; dropped: number } {
   const legs: SlipLeg[] = [];
   const seen = new Set<string>();

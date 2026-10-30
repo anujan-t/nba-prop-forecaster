@@ -14,7 +14,7 @@ from scipy.special import expit, logit
 
 from backend.data import STATS, Store, validate_frame
 from backend.learning import (
-    Learning, bet_outcome, calibration_curve, fit_calibration, fit_recalibration, grade_leg, nba_game_logs,
+    Learning, bet_outcome, calibration_curve, fit_calibration, fit_recalibration, grade_game_leg, grade_leg, nba_game_logs,
     normalize_phrase, recalibrate, tokens, walk_forward_samples,
 )
 from backend.nlu import name_key
@@ -353,7 +353,7 @@ class TrackTests(TempStoreCase):
                          (264, 10.0, "pending", None, "Friday parlay"))
         self.assertAlmostEqual(bet["independent_probability"], 0.27)
         self.assertAlmostEqual(bet["probability"], 0.27 * 1.05)
-        self.assertEqual(bet["legs"][0], {"player_id": "201", "player": "Alpha One", "team": "DEN", "stat": "points",
+        self.assertEqual(bet["legs"][0], {"kind": "player", "player_id": "201", "player": "Alpha One", "team": "DEN", "stat": "points",
                                           "line": 22.5, "side": "over", "probability": 0.6, "status": "pending",
                                           "actual": None, "settled_at": None})
         self.assertEqual((bet["legs"][1]["line"], bet["legs"][1]["side"], bet["legs"][1]["probability"]), (10.0, "under", 0.45))
@@ -424,6 +424,14 @@ class GradingTests(unittest.TestCase):
         self.assertEqual(grade_leg(7, 6.5, "under"), "lost")
         self.assertEqual(grade_leg(0, 0.5, "under"), "won")
 
+    def test_grade_game_leg(self):
+        self.assertEqual(grade_game_leg(3, "moneyline", None), "won")
+        self.assertEqual(grade_game_leg(-1, "moneyline", None), "lost")
+        self.assertEqual(grade_game_leg(-2, "spread", 2.5), "won")
+        self.assertEqual(grade_game_leg(4, "spread", -4.0), "push")
+        self.assertEqual(grade_game_leg(3, "spread", -4.0), "lost")
+        self.assertEqual(grade_game_leg(5, "spread", -4.5), "won")
+
     def test_bet_outcome(self):
         self.assertEqual(bet_outcome(["won", "lost"], 10.0, 200), ("lost", -10.0))
         self.assertEqual(bet_outcome(["lost", "pending"], 10.0, 200), ("lost", -10.0))
@@ -438,6 +446,123 @@ class GradingTests(unittest.TestCase):
         self.assertEqual(bet_outcome(["won"], None, 150), ("won", None))
         self.assertEqual(bet_outcome(["won", "push"], 10.0, 264), ("reduced", None))
         self.assertEqual(bet_outcome(["won", "void", "won"], 10.0, 264), ("reduced", None))
+
+
+def game_slip_leg(game_id: str, team: str, opponent: str, home: bool, market: str, line: float | None = None,
+                  day: str = "2026-01-15") -> dict:
+    request = {"kind": "game", "game_id": game_id, "date": day, "team": team, "opponent": opponent, "home": home,
+               "market": market, "line": line}
+    return {"request": request, "label": {"player": f"{team} Team", "team": team}}
+
+
+def game_priced(legs: list[dict], probabilities: list[float], pushes: list[float] | None = None) -> dict:
+    pushes = pushes or [0.0] * len(legs)
+    quotes = []
+    for index, (leg, probability, push) in enumerate(zip(legs, probabilities, pushes)):
+        request = leg["request"]
+        if request.get("kind") == "game":
+            quotes.append({"index": index, "kind": "game", "team": request["team"], "market": request["market"],
+                           "line": request["line"], "probability": probability, "push": push})
+        else:
+            name, team = PLAYERS[request["player_id"]]
+            quotes.append({"index": index, "kind": "player", "player": {"id": request["player_id"], "name": name, "team": team},
+                           "stat": request["stat"], "line": request["line"], "side": request["side"], "probability": probability, "push": push})
+    return {"legs": quotes, "probability": math.prod(probabilities), "independent_probability": math.prod(probabilities)}
+
+
+def final(game_id: str, home: str, home_score: int | None, away: str, away_score: int | None, state: str = "post",
+          detail: str = "Final") -> dict:
+    return {"id": game_id, "state": state, "detail": detail, "home": {"team": home, "score": home_score},
+            "away": {"team": away, "score": away_score}}
+
+
+class GameLedgerTests(TempStoreCase):
+    """Moneyline and spread legs: tracked like props, graded from final scores as soon as the game is final."""
+
+    def setUp(self):
+        super().setUp()
+        self.boards = {"2026-01-15": [final("77", "GSW", 108, "DEN", 112), final("78", "BOS", 100, "NYK", 96),
+                                      final("79", "MIA", None, "PHX", None, "post", "Postponed"),
+                                      final("80", "LAL", None, "OKC", None, "pre", "7:30 PM")],
+                       "2026-01-16": [final("81", "LAL", None, "MIA", None, "pre", "10:00 PM")]}
+        self.scores = lambda day: {"games": self.boards.get(day.isoformat(), [])}
+        self.learning = Learning(self.store, history=FakeHistory({"201": [game_row("201", "2026-01-15", points=25)]}),
+                                 clock=self.clock, scores=self.scores)
+
+    def track(self, legs: list[dict], probabilities: list[float], stake=10.0, odds=264, pushes=None) -> dict:
+        return self.learning.track(legs, odds, stake, date(2026, 1, 15), game_priced(legs, probabilities, pushes), None)
+
+    def test_game_legs_are_tracked_with_their_market(self):
+        bet = self.track([game_slip_leg("77", "DEN", "GSW", False, "moneyline"), game_slip_leg("77", "DEN", "GSW", False, "spread", 2.5)],
+                         [0.45, 0.55])
+        moneyline, spread = bet["legs"]
+        self.assertEqual((moneyline["kind"], moneyline["market"], moneyline["line"], moneyline["team"], moneyline["opponent"],
+                          moneyline["home"], moneyline["game_id"], moneyline["date"]),
+                         ("game", "moneyline", None, "DEN", "GSW", False, "77", "2026-01-15"))
+        self.assertEqual((spread["market"], spread["line"], spread["player"]), ("spread", 2.5, "DEN Team"))
+        with self.assertRaisesRegex(ValueError, "does not match its priced forecast"):
+            legs = [game_slip_leg("77", "DEN", "GSW", False, "spread", 2.5)]
+            self.learning.track(legs, None, None, None, game_priced([game_slip_leg("77", "DEN", "GSW", False, "spread", 3.5)], [0.5]), None)
+        with self.assertRaisesRegex(ValueError, "repeats a game's moneyline"):
+            self.track([game_slip_leg("77", "DEN", "GSW", False, "moneyline"), game_slip_leg("77", "GSW", "DEN", True, "moneyline")], [0.4, 0.6])
+        with self.assertRaisesRegex(ValueError, "needs a game, a team and a market"):
+            self.track([game_slip_leg("77", "DEN", "GSW", False, "total")], [0.5])
+
+    def test_settle_grades_game_legs_from_final_scores(self):
+        won = self.track([game_slip_leg("77", "DEN", "GSW", False, "moneyline"), game_slip_leg("77", "DEN", "GSW", False, "spread", 2.5)],
+                         [0.45, 0.55])
+        push = self.track([game_slip_leg("78", "BOS", "NYK", True, "spread", -4.0)], [0.5], odds=-110, pushes=[0.03])
+        lost = self.track([game_slip_leg("78", "NYK", "BOS", False, "moneyline")], [0.4], odds=150)
+        void = self.track([game_slip_leg("79", "PHX", "MIA", False, "moneyline")], [0.5], odds=-110)
+        waiting = self.track([game_slip_leg("80", "OKC", "LAL", False, "moneyline")], [0.6], odds=-150)
+        missing = self.track([game_slip_leg("99", "DEN", "UTA", True, "moneyline")], [0.6], odds=-150)
+        tomorrow = self.track([game_slip_leg("81", "MIA", "LAL", False, "moneyline", day="2026-01-17")], [0.5], odds=100)
+        mixed = self.track([slip_leg("201", "points", 22.5, "over"), game_slip_leg("77", "GSW", "DEN", True, "spread", -1.5)], [0.6, 0.5])
+        result = self.learning.settle()
+        bets = {bet["id"]: bet for bet in self.learning.bets()}
+        self.assertEqual((bets[won["id"]]["status"], bets[won["id"]]["profit"]), ("won", 26.4))
+        self.assertEqual([leg["actual"] for leg in bets[won["id"]]["legs"]], [4, 4])
+        self.assertEqual((bets[push["id"]]["legs"][0]["status"], bets[push["id"]]["status"]), ("push", "void"))
+        self.assertEqual(bets[lost["id"]]["status"], "lost")
+        self.assertEqual(bets[void["id"]]["legs"][0]["status"], "void")
+        self.assertEqual(bets[waiting["id"]]["status"], "pending")
+        self.assertEqual(bets[missing["id"]]["status"], "pending")
+        self.assertEqual(bets[tomorrow["id"]]["status"], "pending")
+        self.assertEqual([leg["status"] for leg in bets[mixed["id"]]["legs"]], ["won", "lost"])
+        self.assertTrue(any("not on that day's scoreboard" in warning for warning in result["warnings"]))
+        self.assertEqual(len(self.learning.ledger_samples()), 1)
+        self.assertEqual(self.learning.ledger_samples().iloc[0]["player_id"], "201")
+        self.assertEqual(self.learning.track_record()["legs_graded"], 5)
+
+    def test_settling_without_a_scoreboard_keeps_game_legs_pending(self):
+        learning = Learning(self.store, clock=self.clock)
+        learning.track([game_slip_leg("77", "DEN", "GSW", False, "moneyline")], None, None, date(2026, 1, 15),
+                       game_priced([game_slip_leg("77", "DEN", "GSW", False, "moneyline")], [0.5]), None)
+        result = learning.settle()
+        self.assertEqual(result["settled_legs"], 0)
+        self.assertIn("no scoreboard is connected", result["warnings"][0])
+
+    def test_ledgers_from_before_game_legs_gain_the_kind_column(self):
+        import sqlite3
+        path = Path(self.directory.name) / "old"
+        path.mkdir()
+        old = Store(path)
+        db = sqlite3.connect(old.path)
+        try:
+            db.execute("""CREATE TABLE ledger_bets (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+                event_date TEXT NOT NULL, book_odds INTEGER, stake REAL, probability REAL NOT NULL, independent_probability REAL NOT NULL,
+                status TEXT NOT NULL, profit REAL, note TEXT)""")
+            db.execute("""CREATE TABLE ledger_legs (bet_id TEXT NOT NULL, position INTEGER NOT NULL, player_id TEXT NOT NULL,
+                player TEXT NOT NULL, team TEXT NOT NULL, stat TEXT NOT NULL, line REAL NOT NULL, side TEXT NOT NULL,
+                probability REAL NOT NULL, push REAL NOT NULL, status TEXT NOT NULL, actual INTEGER, settled_at TEXT,
+                request TEXT NOT NULL, PRIMARY KEY (bet_id, position))""")
+            db.execute("INSERT INTO ledger_bets VALUES (1, 'b1', '2026-01-10T00:00:00Z', '2026-01-09', NULL, NULL, 0.5, 0.5, 'pending', NULL, NULL)")
+            db.execute("INSERT INTO ledger_legs VALUES ('b1', 0, '201', 'Alpha One', 'DEN', 'points', 22.5, 'over', 0.5, 0, 'pending', NULL, NULL, '{}')")
+            db.commit()
+        finally:
+            db.close()
+        bets = Learning(old, clock=self.clock).bets()
+        self.assertEqual(bets[0]["legs"][0]["kind"], "player")
 
 
 class SettleTests(TempStoreCase):

@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 from threading import Lock, RLock, Thread
 import time
-from typing import Literal
+from typing import Annotated, Literal, Union
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator, model_validator
 import pandas as pd
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -28,11 +28,13 @@ from .learning import Learning
 from .newsroom import Newsroom
 from .llm import LLMClient
 from .stats import PROP_STATS, catalog, label as stat_label, validate_line as validate_market_line
+from .teams import MAX_SPREAD, GameModel, GameModelUnavailable
 
 ROOT = Path(__file__).resolve().parent.parent
 Stat = Literal[PROP_STATS]  # type: ignore[valid-type]
 Model = Literal["auto", "empirical", "normal", "poisson", "negative_binomial", "simulation"]
 DEFAULT_LOOKBACK = 60
+GameDate = date
 
 
 class StrictModel(BaseModel):
@@ -136,6 +138,7 @@ class PlayerHistoryRequest(StrictModel):
 
 
 class ParlayLeg(StrictModel):
+    kind: Literal["player"] = "player"
     dataset_id: str = Field(min_length=1, max_length=80)
     player_id: str = Field(min_length=1, max_length=80)
     stat: Stat
@@ -159,8 +162,46 @@ class ParlayLeg(StrictModel):
         return self
 
 
+class GameLeg(StrictModel):
+    """A moneyline or point spread on one team in one game (the game is ESPN's event on that US Eastern date)."""
+    kind: Literal["game"]
+    game_id: str = Field(pattern=r"^\d{1,20}$")
+    date: GameDate
+    team: str = Field(pattern=r"^[A-Z]{2,4}$")
+    opponent: str = Field(pattern=r"^[A-Z]{2,4}$")
+    home: bool
+    market: Literal["moneyline", "spread"]
+    line: float | None = Field(default=None, ge=-MAX_SPREAD, le=MAX_SPREAD)
+
+    @model_validator(mode="after")
+    def validate_market(self):
+        if self.team == self.opponent:
+            raise ValueError("A team can't play itself; check the opponent.")
+        if self.market == "moneyline" and self.line is not None:
+            raise ValueError("A moneyline has no line; use a spread for a points handicap.")
+        if self.market == "spread":
+            if self.line is None:
+                raise ValueError("A spread needs a line, such as -5.5 or +3.")
+            if self.line * 2 != int(self.line * 2):
+                raise ValueError("Use a whole-number or half-point spread.")
+        return self
+
+
+def leg_kind(value) -> str:
+    """Legs without a kind are player props, so slips saved before moneylines and spreads still load."""
+    kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
+    return kind or "player"
+
+
+AnyLeg = Annotated[Union[Annotated[ParlayLeg, Tag("player")], Annotated[GameLeg, Tag("game")]], Discriminator(leg_kind)]
+
+
+def leg_key(leg: ParlayLeg | GameLeg) -> tuple:
+    return ("game", leg.game_id, leg.market) if isinstance(leg, GameLeg) else ("player", leg.player_id, leg.stat)
+
+
 class ParlayRequest(StrictModel):
-    legs: list[ParlayLeg] = Field(min_length=1, max_length=MAX_LEGS)
+    legs: list[AnyLeg] = Field(min_length=1, max_length=MAX_LEGS)
     book_odds: int | None = None
     simulations: int | None = Field(default=None, ge=simulation.MIN_SIMULATIONS, le=simulation.MAX_SIMULATIONS)
 
@@ -171,12 +212,12 @@ class ParlayRequest(StrictModel):
 
 
 class LegLabel(StrictModel):
-    player: str = Field(min_length=1, max_length=120)
+    player: str = Field(min_length=1, max_length=120)  # the player, or the team for a moneyline or spread
     team: str = Field(default="", max_length=60)
 
 
 class SlipLeg(StrictModel):
-    request: ParlayLeg
+    request: AnyLeg
     label: LegLabel
 
 
@@ -192,9 +233,9 @@ class Slip(StrictModel):
     @field_validator("legs")
     @classmethod
     def unique_legs(cls, legs: list[SlipLeg]) -> list[SlipLeg]:
-        keys = [(leg.request.player_id, leg.request.stat) for leg in legs]
+        keys = [leg_key(leg.request) for leg in legs]
         if len(set(keys)) != len(keys):
-            raise ValueError("Each player and stat may appear only once in the slip.")
+            raise ValueError("Each player and stat, and each game's moneyline and spread, may appear only once in the slip.")
         return legs
 
 
@@ -344,8 +385,6 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
             raise HTTPException(404, "Player is not listed on NBA's current roster. Refresh the league directory if a recent signing is missing.")
         return player
 
-    learning = Learning(store, history=lambda player_id, refresh: history_frame(player_id, refresh))
-    app.state.learning = learning
     try:
         language_model = LLMClient.from_env()
     except ValueError as exc:
@@ -359,11 +398,16 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
 
     newsroom = Newsroom(store, roster_players)
     app.state.newsroom = newsroom
+    team_model = GameModel(store, today=newsroom.today, schedule=newsroom.scoreboard)
+    app.state.team_model = team_model
+    learning = Learning(store, history=lambda player_id, refresh: history_frame(player_id, refresh), scores=newsroom.scoreboard)
+    app.state.learning = learning
     if background:
         Thread(target=newsroom.warm, name="courtside-news-warmup", daemon=True).start()
     coach = Coach(lambda: roster_or_saved()["players"], lambda player_id, refresh: history_frame(player_id, refresh),
                   store.load, learning=learning, llm=language_model, newsroom=newsroom,
-                  profile=lambda player_id: cached_provider("profile:" + player_id, lambda: fetch_profile(player_id)))
+                  profile=lambda player_id: cached_provider("profile:" + player_id, lambda: fetch_profile(player_id)),
+                  games=team_model)
     app.state.coach = coach
     retrain_lock = Lock()
     last_retrain = {"at": float("-inf")}
@@ -463,14 +507,16 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
     @app.post("/api/parlay")
     def run_parlay(body: ParlayRequest):
         try:
-            result = price_parlay([leg.model_dump() for leg in body.legs], body.book_odds, store.load, calibrator=learning,
-                                  simulations=body.simulations)
+            result = price_parlay([leg.model_dump(mode="json") for leg in body.legs], body.book_odds, store.load, calibrator=learning,
+                                  simulations=body.simulations, team_model=team_model)
         except LegNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         flagged = []
         for leg in result["legs"]:
+            if leg.get("kind") == "game":
+                continue
             injury = saved_injury(leg["player"]["id"])
             leg["injury"] = injury
             if injury and injury["player_id"] not in flagged:
@@ -478,13 +524,21 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
                 result["warnings"].insert(0, f"Leg {leg['index'] + 1}: " + injury_warning(injury))
         return result
 
+    @app.get("/api/games/model")
+    def games_model():
+        """Team ratings, home court, the back-to-back penalty and the walk-forward check behind moneylines and spreads."""
+        try:
+            return team_model.status()
+        except (GameModelUnavailable, NBAUnavailableError) as exc:
+            raise HTTPException(502, str(exc)) from exc
+
     @app.get("/api/assistant/status")
     def assistant_status():
         return coach.status()
 
     @app.post("/api/assistant/chat")
     def assistant_chat(body: ChatRequest):
-        slip = body.slip.model_dump()
+        slip = body.slip.model_dump(mode="json")
         try:
             return coach.chat(body.message, body.conversation_id, slip, body.focus.model_dump() if body.focus else None)
         except HTTPException:
@@ -505,9 +559,9 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
 
     @app.post("/api/ledger", status_code=201)
     def track_bet(body: TrackBetRequest):
-        slip = body.slip.model_dump()
+        slip = body.slip.model_dump(mode="json")
         try:
-            priced = price_parlay([leg["request"] for leg in slip["legs"]], slip["book_odds"], store.load)
+            priced = price_parlay([leg["request"] for leg in slip["legs"]], slip["book_odds"], store.load, team_model=team_model)
             return learning.track(slip["legs"], slip["book_odds"], body.stake, body.event_date, priced, body.note)
         except LegNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -771,7 +825,16 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
         playing = {code for game in board["games"] for code in (game["home"]["team"], game["away"]["team"])}
         injuries = {team["team"]: [entry for entry in team["injuries"] if entry["status_key"] in ("out", "suspended", "doubtful", "questionable", "day_to_day")]
                     for team in (report or {}).get("teams", []) if team["team"] in playing}
-        return {**board, "injuries": injuries, "today": newsroom.today().isoformat()}
+        model_error = None
+        for game in board["games"]:
+            game["model"] = None
+            if game["state"] != "pre" or model_error:
+                continue
+            try:
+                game["model"] = team_model.annotate(game)
+            except (GameModelUnavailable, NBAUnavailableError) as exc:
+                model_error = f"The team model is unavailable: {exc}"
+        return {**board, "injuries": injuries, "today": newsroom.today().isoformat(), "model_error": model_error}
 
     @app.get("/api/news/teams")
     def news_teams(season: Literal["current", "previous"] = "current", refresh: bool = False):

@@ -1,10 +1,10 @@
 import { Check, Minus, Plus, Replace, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { decimal, isMilestone, modelNames, pct, statNames } from './api';
-import { InjuryBadge } from './NewsPage';
-import { MAX_LEGS, americanLabel, chance, decimalOdds, legDescription, legFromForecast, legKey, legNumber, normalizeLine, sameLeg, sideNames, statLabel } from './parlay';
+import { decimal, edgePoints, isMilestone, modelNames, pct, statNames } from './api';
+import { InjuryBadge, gameDayLabel } from './NewsPage';
+import { MAX_LEGS, MAX_SPREAD, americanLabel, chance, decimalOdds, isGameLeg, isGameRequest, legDescription, legFromForecast, legKey, legNumber, sameLeg, sideNames, spreadLabel, statLabel } from './parlay';
 import type { SlipLeg } from './parlay';
-import type { ParlayLeg, Side } from './parlay-types';
+import type { AnyParlayLeg, GameLegRequest, Side } from './parlay-types';
 import type { AppliedForecast } from './types';
 
 const yesNoNames: Record<Side, string> = { over: 'Yes', under: 'No' };
@@ -15,34 +15,46 @@ export function SideToggle({ side, onChange, label, yesNo = false }: { side: Sid
   </div>;
 }
 
+/** Which team a moneyline or spread backs: away first, as games are written. */
+export function TeamToggle({ teams, team, onChange, label }: { teams: [string, string]; team: string; onChange: (team: string) => void; label: string }) {
+  return <div className="side-toggle team-toggle" role="group" aria-label={label}>
+    {teams.map(option => <button key={option} type="button" className={team === option ? 'selected' : ''} aria-pressed={team === option} onClick={() => { if (option !== team) onChange(option); }}>{option}</button>)}
+  </div>;
+}
+
 /** Line editor in 0.5 steps. Typed values are committed on Enter or blur and snapped to the nearest whole or half point. */
-export function LineStepper({ value, onChange, label }: { value: number; onChange: (value: number) => void; label: string }) {
-  const [draft, setDraft] = useState(String(value));
+export function LineStepper({ value, onChange, label, min = 0, max = 200, signed = false }: {
+  value: number; onChange: (value: number) => void; label: string; min?: number; max?: number; signed?: boolean;
+}) {
+  const shown = (line: number) => signed && line > 0 ? `+${line}` : String(line);
+  const snap = (line: number) => Number.isFinite(line) ? Math.min(max, Math.max(min, Math.round(line * 2) / 2)) || 0 : null;
+  const [draft, setDraft] = useState(shown(value));
   const [invalid, setInvalid] = useState(false);
-  useEffect(() => { setDraft(String(value)); setInvalid(false); }, [value]);
+  useEffect(() => { setDraft(shown(value)); setInvalid(false); }, [value]);
   const step = (delta: number) => {
-    const next = normalizeLine(value + delta);
+    const next = snap(value + delta);
     if (next !== null && next !== value) onChange(next);
   };
   const commit = () => {
-    const text = draft.trim().replace(',', '.');
-    const next = text === '' ? null : normalizeLine(Number(text));
-    if (next === null) { setDraft(String(value)); setInvalid(true); return; }
+    const text = draft.trim().replace(',', '.').replace(/[−–]/g, '-');
+    const next = text === '' ? null : snap(Number(text));
+    if (next === null) { setDraft(shown(value)); setInvalid(true); return; }
     setInvalid(false);
-    setDraft(String(next));
+    setDraft(shown(next));
     if (next !== value) onChange(next);
   };
+  const range = signed ? `${min} to +${max}` : `${min} to ${max}`;
   return <div className={`line-stepper${invalid ? ' invalid' : ''}`} role="group" aria-label={label}>
-    <button type="button" aria-label="Lower the line by 0.5" disabled={value <= 0} onClick={() => step(-0.5)}><Minus size={14} aria-hidden="true" /></button>
-    <input type="text" inputMode="decimal" autoComplete="off" spellCheck={false} aria-label="Line" aria-invalid={invalid} value={draft} title="Whole or half points from 0 to 200"
+    <button type="button" aria-label="Lower the line by 0.5" disabled={value <= min} onClick={() => step(-0.5)}><Minus size={14} aria-hidden="true" /></button>
+    <input type="text" inputMode="decimal" autoComplete="off" spellCheck={false} aria-label="Line" aria-invalid={invalid} value={draft} title={`Whole or half points from ${range}`}
       onChange={event => setDraft(event.target.value.slice(0, 6))} onBlur={commit}
       onKeyDown={event => {
         if (event.key === 'Enter') { event.preventDefault(); commit(); }
         else if (event.key === 'ArrowUp') { event.preventDefault(); step(0.5); }
         else if (event.key === 'ArrowDown') { event.preventDefault(); step(-0.5); }
       }} />
-    <button type="button" aria-label="Raise the line by 0.5" disabled={value >= 200} onClick={() => step(0.5)}><Plus size={14} aria-hidden="true" /></button>
-    {invalid && <span className="line-stepper-error" role="alert">Use a number from 0 to 200.</span>}
+    <button type="button" aria-label="Raise the line by 0.5" disabled={value >= max} onClick={() => step(0.5)}><Plus size={14} aria-hidden="true" /></button>
+    {invalid && <span className="line-stepper-error" role="alert">Use a number from {range}.</span>}
   </div>;
 }
 
@@ -57,7 +69,7 @@ export function focusNearestLeg(container: HTMLElement | null, index: number, fa
 interface LegEditorProps {
   leg: SlipLeg;
   index: number;
-  computed: { leg: ParlayLeg; fresh: boolean } | null;
+  computed: { leg: AnyParlayLeg; fresh: boolean } | null;
   computing: boolean;
   errors?: string[];
   detailed?: boolean;
@@ -65,40 +77,87 @@ interface LegEditorProps {
   calibrated?: number | null;
   onSide: (index: number, side: Side) => void;
   onLine: (index: number, line: number) => void;
+  onTeam: (index: number, team: string) => void;
   onRemove: (index: number) => void;
 }
 
-export function LegEditor({ leg, index, computed, computing, errors, detailed = false, calibrated = null, onSide, onLine, onRemove }: LegEditorProps) {
+function LegChance({ probability, fresh, computing, calibrated = null }: { probability: number | null; fresh: boolean; computing: boolean; calibrated?: number | null }) {
+  return <div className={`leg-probability${fresh ? '' : ' is-stale'}`}>
+    <div className="leg-bar" aria-hidden="true"><span style={{ width: probability === null ? '0%' : pct(Math.min(1, Math.max(0, probability))) }} /></div>
+    <span className="leg-percent">
+      {probability === null ? (computing ? 'Calculating…' : '—') : <>{chance(probability)}<span className="sr-only"> chance this leg wins</span></>}
+      {probability !== null && calibrated !== null && Number.isFinite(calibrated) && <span className="cal-tag" title="After the learning loop’s calibration">cal. {chance(calibrated)}<span className="sr-only"> after calibration</span></span>}
+      {probability !== null && !fresh && <span className="stale-tag">{computing ? 'updating' : 'out of date'}</span>}
+    </span>
+  </div>;
+}
+
+function GameLegEditor({ leg, request, index, computed, computing, errors, detailed = false, onLine, onTeam, onRemove }: Omit<LegEditorProps, 'onSide' | 'calibrated'> & { request: GameLegRequest }) {
   const description = legDescription(leg);
-  const shown = computed?.leg ?? null;
+  const shown = computed && isGameLeg(computed.leg) ? computed.leg : null;
   const fresh = computed?.fresh ?? false;
-  const probability = shown?.probability ?? null;
-  const games = shown?.hit_rate.games ?? 0;
-  const yesNo = isMilestone(leg.request.stat);
-  return <li className={`leg-card${detailed ? ' leg-card-detailed' : ''}${errors?.length ? ' has-error' : ''} side-${leg.request.side}`}>
+  const away = request.home ? request.opponent : request.team;
+  const home = request.home ? request.team : request.opponent;
+  const book = shown?.book ?? null;
+  return <li className={`leg-card side-game${detailed ? ' leg-card-detailed' : ''}${errors?.length ? ' has-error' : ''}`}>
     <span className="leg-number" aria-hidden="true">{legNumber(index)}</span>
     <div className="leg-body">
       <div className="leg-head">
         <div className="leg-who">
           <h3><span className="sr-only">Leg {index + 1}: </span>{leg.label.player}</h3>
-          <span>{[leg.label.team, statNames[leg.request.stat]].filter(Boolean).join(' · ')}</span>
+          <span>{[request.market === 'moneyline' ? 'Moneyline' : 'Spread', `${away} @ ${home}`, gameDayLabel(request.date)].join(' · ')}</span>
+        </div>
+        <button type="button" className="icon-button leg-remove" aria-label={`Remove leg ${index + 1}: ${description}`} title="Remove leg" onClick={() => onRemove(index)}><X size={16} aria-hidden="true" /></button>
+      </div>
+      <div className="leg-controls">
+        <TeamToggle teams={[away, home]} team={request.team} onChange={team => onTeam(index, team)} label={`Team for leg ${index + 1}`} />
+        {request.market === 'spread' && request.line !== null
+          ? <LineStepper value={request.line} onChange={line => onLine(index, line)} label={`Spread for leg ${index + 1}, ${request.team}`} min={-MAX_SPREAD} max={MAX_SPREAD} signed />
+          : <span className="leg-yes-no">{request.team} to win</span>}
+      </div>
+      <LegChance probability={shown?.probability ?? null} fresh={fresh} computing={computing} />
+      {detailed && shown && <dl className={`leg-facts${fresh ? '' : ' is-stale'}`}>
+        <div><dt>Model line</dt><dd>{request.team} {spreadLabel(shown.fair_spread)} · {pct(shown.win_probability)} to win</dd></div>
+        <div><dt>Book</dt><dd>{book ? <>{americanLabel(book.odds)} · needs {pct(book.implied)}</> : 'No listed price at this line'}</dd></div>
+        <div><dt>Model minus break-even</dt><dd className={book ? (book.edge >= 0 ? 'positive' : 'negative') : undefined}>{book ? edgePoints(book.edge) : 'N/A'}</dd></div>
+        <div><dt>Fair odds</dt><dd>{shown.fair_odds ? `${americanLabel(shown.fair_odds.american)} · ${decimalOdds(shown.fair_odds.decimal)}` : 'N/A'}</dd></div>
+        {shown.push > 0 && <div><dt>Push</dt><dd>{pct(shown.push)}</dd></div>}
+        <div className="leg-fact-wide"><dt>Model</dt><dd>Team ratings from {shown.games.toLocaleString()} games{shown.back_to_back ? ` · ${request.team} on a back-to-back` : ''}{shown.early_season ? ' · early season, leaning on last season' : ''}</dd></div>
+      </dl>}
+      {errors?.map((message, position) => <p key={position} className="leg-error" role="alert">{message}</p>)}
+    </div>
+  </li>;
+}
+
+export function LegEditor({ leg, index, computed, computing, errors, detailed = false, calibrated = null, onSide, onLine, onTeam, onRemove }: LegEditorProps) {
+  const request = leg.request;
+  if (isGameRequest(request)) {
+    return <GameLegEditor leg={leg} request={request} index={index} computed={computed} computing={computing} errors={errors} detailed={detailed}
+      onLine={onLine} onTeam={onTeam} onRemove={onRemove} />;
+  }
+  const description = legDescription(leg);
+  const shown = computed && !isGameLeg(computed.leg) ? computed.leg : null;
+  const fresh = computed?.fresh ?? false;
+  const probability = shown?.probability ?? null;
+  const games = shown?.hit_rate.games ?? 0;
+  const yesNo = isMilestone(request.stat);
+  return <li className={`leg-card${detailed ? ' leg-card-detailed' : ''}${errors?.length ? ' has-error' : ''} side-${request.side}`}>
+    <span className="leg-number" aria-hidden="true">{legNumber(index)}</span>
+    <div className="leg-body">
+      <div className="leg-head">
+        <div className="leg-who">
+          <h3><span className="sr-only">Leg {index + 1}: </span>{leg.label.player}</h3>
+          <span>{[leg.label.team, statNames[request.stat]].filter(Boolean).join(' · ')}</span>
           {shown?.injury && <InjuryBadge entry={shown.injury} />}
         </div>
         <button type="button" className="icon-button leg-remove" aria-label={`Remove leg ${index + 1}: ${description}`} title="Remove leg" onClick={() => onRemove(index)}><X size={16} aria-hidden="true" /></button>
       </div>
       <div className="leg-controls">
-        <SideToggle side={leg.request.side} onChange={side => onSide(index, side)} label={`Side for leg ${index + 1}`} yesNo={yesNo} />
-        {yesNo ? <span className="leg-yes-no">{leg.request.side === 'over' ? `Gets a ${statLabel(leg.request.stat)}` : `No ${statLabel(leg.request.stat)}`}</span>
-          : <LineStepper value={leg.request.line} onChange={line => onLine(index, line)} label={`Line for leg ${index + 1}, ${statLabel(leg.request.stat)}`} />}
+        <SideToggle side={request.side} onChange={side => onSide(index, side)} label={`Side for leg ${index + 1}`} yesNo={yesNo} />
+        {yesNo ? <span className="leg-yes-no">{request.side === 'over' ? `Gets a ${statLabel(request.stat)}` : `No ${statLabel(request.stat)}`}</span>
+          : <LineStepper value={request.line} onChange={line => onLine(index, line)} label={`Line for leg ${index + 1}, ${statLabel(request.stat)}`} />}
       </div>
-      <div className={`leg-probability${fresh ? '' : ' is-stale'}`}>
-        <div className="leg-bar" aria-hidden="true"><span style={{ width: probability === null ? '0%' : pct(Math.min(1, Math.max(0, probability))) }} /></div>
-        <span className="leg-percent">
-          {probability === null ? (computing ? 'Calculating…' : '—') : <>{chance(probability)}<span className="sr-only"> chance this leg wins</span></>}
-          {probability !== null && calibrated !== null && Number.isFinite(calibrated) && <span className="cal-tag" title="After the learning loop’s calibration">cal. {chance(calibrated)}<span className="sr-only"> after calibration</span></span>}
-          {probability !== null && !fresh && <span className="stale-tag">{computing ? 'updating' : 'out of date'}</span>}
-        </span>
-      </div>
+      <LegChance probability={probability} fresh={fresh} computing={computing} calibrated={calibrated} />
       {detailed && shown && <dl className={`leg-facts${fresh ? '' : ' is-stale'}`}>
         <div><dt>Hit rate</dt><dd>{shown.hit_rate.hits}/{games}{games ? ` · ${pct(shown.hit_rate.hits / games, 0)}` : ''}</dd></div>
         <div><dt>Fair odds</dt><dd>{shown.fair_odds ? `${americanLabel(shown.fair_odds.american)} · ${decimalOdds(shown.fair_odds.decimal)}` : 'N/A'}</dd></div>
@@ -126,6 +185,7 @@ export function ForecastParlayActions({ applied, legs, full, dirty, onAdd, onOpe
   const key = legKey(applied.request);
   const index = legs.findIndex(leg => legKey(leg.request) === key);
   const existing = index >= 0 ? legs[index] : null;
+  const existingProp = existing && !isGameRequest(existing.request) ? existing.request : null;
   const button = (side: Side) => {
     const candidate = legFromForecast(applied, side);
     const probability = side === 'over' ? forecast.probabilities.over : forecast.probabilities.under;
@@ -138,8 +198,8 @@ export function ForecastParlayActions({ applied, legs, full, dirty, onAdd, onOpe
       {existing ? <Replace size={16} aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}<span>{label}</span><span className="leg-action-prob">{pct(probability)}</span>
     </button>;
   };
-  const message = existing
-    ? `Your slip already has ${forecast.player.name} ${statLabel(forecast.stat)} as leg ${index + 1} (${sideNames[existing.request.side]} ${existing.request.line}). One leg per player and stat.`
+  const message = existingProp
+    ? `Your slip already has ${forecast.player.name} ${statLabel(forecast.stat)} as leg ${index + 1} (${sideNames[existingProp.side]} ${existingProp.line}). One leg per player and stat.`
     : full ? `The slip is full: ${MAX_LEGS} legs is the maximum. Remove a leg to add this one.`
       : 'Back the Over or the Under as a parlay leg. The Parlay view shows the chance that every leg hits.';
   return <div className="card parlay-actions">

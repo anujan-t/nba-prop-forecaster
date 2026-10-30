@@ -76,6 +76,7 @@ SCHEMA = (
         bet_id TEXT NOT NULL, position INTEGER NOT NULL, player_id TEXT NOT NULL, player TEXT NOT NULL,
         team TEXT NOT NULL, stat TEXT NOT NULL, line REAL NOT NULL, side TEXT NOT NULL, probability REAL NOT NULL,
         push REAL NOT NULL, status TEXT NOT NULL, actual INTEGER, settled_at TEXT, request TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'player',
         PRIMARY KEY (bet_id, position)
     )""",
     "CREATE INDEX IF NOT EXISTS ledger_legs_status ON ledger_legs (status, player_id)",
@@ -222,6 +223,14 @@ def grade_leg(actual: int, line: float, side: str) -> str:
     if actual == line:
         return "push"
     return "won" if (actual > line) == (side == "over") else "lost"
+
+
+def grade_game_leg(margin: int, market: str, line: float | None) -> str:
+    """A moneyline wins when the team wins; a spread wins when the team's margin plus its line is positive, pushes at zero."""
+    if market == "moneyline":
+        return "won" if margin > 0 else "lost"
+    total = margin + float(line or 0.0)
+    return "push" if total == 0 else "won" if total > 0 else "lost"
 
 
 def bet_outcome(statuses: list[str], stake: float | None, book_odds: int | None) -> tuple[str, float | None]:
@@ -610,12 +619,19 @@ def _turn(row) -> dict:
 
 
 def _leg(row) -> dict:
-    return {
-        "player_id": row["player_id"], "player": row["player"], "team": row["team"], "stat": row["stat"],
+    kind = row["kind"] if "kind" in row.keys() else "player"
+    leg = {
+        "kind": kind, "player_id": row["player_id"], "player": row["player"], "team": row["team"], "stat": row["stat"],
         "line": float(row["line"]), "side": row["side"], "probability": float(row["probability"]),
         "status": row["status"], "actual": None if row["actual"] is None else int(row["actual"]),
         "settled_at": row["settled_at"],
     }
+    if kind == "game":
+        request = _load(row["request"]) or {}
+        leg.update({"market": row["stat"], "line": None if row["stat"] == "moneyline" else float(row["line"]),
+                    "game_id": str(request.get("game_id") or ""), "date": request.get("date"), "opponent": request.get("opponent"),
+                    "home": bool(request.get("home"))})
+    return leg
 
 
 def _bet(row, legs: list) -> dict:
@@ -634,9 +650,11 @@ class Learning:
     box_score_hour = BOX_SCORE_HOUR
 
     def __init__(self, store, history: Callable[[str, bool], tuple[str, pd.DataFrame, dict]] | None = None,
-                 clock: Callable[[], datetime] | None = None, today: Callable[[], date] | None = None):
+                 clock: Callable[[], datetime] | None = None, today: Callable[[], date] | None = None,
+                 scores: Callable[[date], dict] | None = None):
         self.store = store
         self._history = history
+        self._scores = scores
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._today = today or (lambda: self._clock().astimezone(EASTERN).date())
         self._lock = threading.RLock()
@@ -650,6 +668,8 @@ class Learning:
         with self._lock, store.connect() as db:
             for statement in SCHEMA:
                 db.execute(statement)
+            if "kind" not in {row["name"] for row in db.execute("PRAGMA table_info(ledger_legs)")}:
+                db.execute("ALTER TABLE ledger_legs ADD COLUMN kind TEXT NOT NULL DEFAULT 'player'")
             self._rekey_aliases(db)
             row = db.execute("SELECT active, intercept, slope, status FROM learning_calibration WHERE id = 1").fetchone()
         if row is not None:
@@ -856,6 +876,9 @@ class Learning:
         for number, (leg, quote) in enumerate(zip(legs, quotes), start=1):
             request = _plain(leg.get("request", leg))
             label = leg.get("label") or {}
+            if request.get("kind") == "game":
+                rows.append(self._game_row(number, request, label, quote, seen))
+                continue
             player_id = str(request.get("player_id", "")).strip()
             stat, side = request.get("stat"), request.get("side")
             if not player_id or stat not in PROP_STATS or side not in SIDES:
@@ -880,7 +903,7 @@ class Learning:
             push = _probability(quote.get("push") or 0.0, f"Leg {number} push probability")
             name = " ".join(str(label.get("player") or player.get("name") or player_id).split())[:80]
             team = str(label.get("team") or player.get("team") or "").strip()[:10]
-            rows.append((number - 1, player_id, name, team, stat, line, side, probability, push, _dump(request)))
+            rows.append((number - 1, player_id, name, team, stat, line, side, probability, push, _dump(request), "player"))
         joint = _probability(priced.get("probability"), "Parlay probability")
         independent = _probability(priced.get("independent_probability"), "Independent parlay probability")
         bet_id = uuid4().hex[:12]
@@ -889,9 +912,44 @@ class Learning:
                 independent_probability, status, profit, note) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?)""",
                        (bet_id, self._now(), day, book_odds, stake, joint, independent, note))
             db.executemany("""INSERT INTO ledger_legs (bet_id, position, player_id, player, team, stat, line, side,
-                probability, push, status, actual, settled_at, request)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?)""", [(bet_id, *row) for row in rows])
+                probability, push, status, actual, settled_at, request, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)""", [(bet_id, *row) for row in rows])
         return self.bet(bet_id)
+
+    @staticmethod
+    def _game_row(number: int, request: dict, label: dict, quote: dict, seen: set) -> tuple:
+        """A moneyline or spread leg as a ledger row: the team in player_id/team, the market in stat, home/away in side."""
+        market = request.get("market")
+        team = str(request.get("team") or "").strip().upper()
+        opponent = str(request.get("opponent") or "").strip().upper()
+        game_id = str(request.get("game_id") or "").strip()
+        if market not in ("moneyline", "spread") or not re.fullmatch(r"[A-Z]{2,4}", team) \
+                or not re.fullmatch(r"[A-Z]{2,4}", opponent) or not re.fullmatch(r"\d{1,20}", game_id):
+            raise ValueError(f"Leg {number} needs a game, a team and a market (moneyline or spread).")
+        _event_date(request.get("date"))
+        line = 0.0
+        if market == "spread":
+            try:
+                line = float(request.get("line"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Leg {number}: the spread must be a number.") from exc
+            if not math.isfinite(line) or abs(line) > 60 or line * 2 != int(line * 2):
+                raise ValueError(f"Leg {number}: use a whole-number or half-point spread between -60 and +60.")
+        if ("game", game_id, market) in seen:
+            raise ValueError(f"Leg {number} repeats a game's {market} already on this slip.")
+        seen.add(("game", game_id, market))
+        try:
+            matches = (quote.get("kind") == "game" and quote.get("team") == team and quote.get("market") == market
+                       and (market == "moneyline" or float(quote.get("line")) == line))
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            raise ValueError(f"Leg {number} does not match its priced forecast; price the slip again.")
+        probability = _probability(quote.get("probability"), f"Leg {number} probability")
+        push = _probability(quote.get("push") or 0.0, f"Leg {number} push probability")
+        name = " ".join(str(label.get("player") or team).split())[:80]
+        return (number - 1, team, name, team, market, line, "home" if request.get("home") else "away", probability, push,
+                _dump(request), "game")
 
     def bet(self, bet_id: str) -> dict | None:
         with self.store.connect() as db:
@@ -929,12 +987,17 @@ class Learning:
             with self.store.connect() as db:
                 pending = db.execute("""SELECT l.bet_id, l.position, l.player_id, l.player, l.stat, l.line, l.side, b.event_date
                     FROM ledger_legs l JOIN ledger_bets b ON b.id = l.bet_id
-                    WHERE l.status = 'pending' AND b.event_date < ? ORDER BY b.seq, l.position""", (today.isoformat(),)).fetchall()
+                    WHERE l.status = 'pending' AND l.kind = 'player' AND b.event_date < ? ORDER BY b.seq, l.position""",
+                                     (today.isoformat(),)).fetchall()
+                game_legs = db.execute("""SELECT l.bet_id, l.position, l.player_id, l.player, l.stat, l.line, l.request, b.event_date
+                    FROM ledger_legs l JOIN ledger_bets b ON b.id = l.bet_id
+                    WHERE l.status = 'pending' AND l.kind = 'game' ORDER BY b.seq, l.position""").fetchall()
             players: dict[str, list] = {}
             for leg in pending:
                 players.setdefault(leg["player_id"], []).append(leg)
             warnings: list[str] = []
             updates = []
+            self._settle_games(game_legs, today, updates, warnings)
             if players and self._history is None:
                 warnings.append(f"Settling needs NBA game logs, but no game-log source is connected; {_legs_stay(len(pending))} pending.")
                 players = {}
@@ -996,6 +1059,50 @@ class Learning:
                     self._refresh_bet(db, bet_id)
             return {"settled_legs": settled, "updated_bets": len(touched), "warnings": warnings, "record": self.track_record()}
 
+    def _settle_games(self, legs: list, today: date, updates: list, warnings: list[str]) -> None:
+        """Grade moneyline and spread legs from final scores on the scoreboard, as soon as each game is final."""
+        by_day: dict[str, list[tuple]] = {}
+        for leg in legs:
+            request = _load(leg["request"]) or {}
+            day = str(request.get("date") or leg["event_date"])[:10]
+            if day <= today.isoformat():
+                by_day.setdefault(day, []).append((leg, request))
+        if by_day and self._scores is None:
+            count = sum(len(items) for items in by_day.values())
+            warnings.append(f"Grading moneylines and spreads needs final scores, but no scoreboard is connected; {_legs_stay(count)} pending.")
+            return
+        for day, items in sorted(by_day.items()):
+            try:
+                board = self._scores(date.fromisoformat(day))
+            except Exception as exc:  # noqa: BLE001 - a provider failure must never abort settling other legs
+                reason = _reason(exc)
+                warnings.append(f"Could not load the scores for {day}; {_legs_stay(len(items))} pending. Settle again later."
+                                + (f" Details: {reason}." if reason else ""))
+                continue
+            found = {str(game.get("id")): game for game in board.get("games", [])}
+            settled_at = self._now()
+            for leg, request in items:
+                game = found.get(str(request.get("game_id")))
+                team = leg["player_id"]
+                if game is None:
+                    warnings.append(f"The {leg['player']} game on {day} is not on that day's scoreboard; {_legs_stay(1)} pending. "
+                                    "Delete the bet if the game moved.")
+                    continue
+                detail = str(game.get("detail") or "").lower()
+                if any(word in detail for word in ("postponed", "canceled", "cancelled")):
+                    updates.append(("void", None, settled_at, leg["bet_id"], leg["position"]))
+                    continue
+                sides = {game["home"]["team"]: game["home"], game["away"]["team"]: game["away"]}
+                mine = sides.get(team)
+                other = next((side for code, side in sides.items() if code != team), None)
+                if mine is None or other is None:
+                    warnings.append(f"The {day} scoreboard game {request.get('game_id')} doesn't include {team}; {_legs_stay(1)} pending.")
+                    continue
+                if game.get("state") != "post" or mine.get("score") is None or other.get("score") is None:
+                    continue
+                margin = int(mine["score"]) - int(other["score"])
+                updates.append((grade_game_leg(margin, leg["stat"], float(leg["line"])), margin, settled_at, leg["bet_id"], leg["position"]))
+
     @staticmethod
     def _refresh_bet(db, bet_id: str) -> None:
         bet = db.execute("SELECT stake, book_odds FROM ledger_bets WHERE id = ?", (bet_id,)).fetchone()
@@ -1028,7 +1135,7 @@ class Learning:
         """Graded (won/lost) tracked legs as over predictions; pushes are excluded, so p is conditional on no push."""
         with self.store.connect() as db:
             rows = db.execute("""SELECT l.player_id, l.stat, l.line, l.side, l.probability, l.push, l.status, b.event_date
-                FROM ledger_legs l JOIN ledger_bets b ON b.id = l.bet_id WHERE l.status IN ('won', 'lost')
+                FROM ledger_legs l JOIN ledger_bets b ON b.id = l.bet_id WHERE l.status IN ('won', 'lost') AND l.kind = 'player'
                 ORDER BY b.seq, l.position""").fetchall()
         records: dict[str, list] = {key: [] for key in ("date", "player_id", "stat", "line", "p", "outcome")}
         for row in rows:

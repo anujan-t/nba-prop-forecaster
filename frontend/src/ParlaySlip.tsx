@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, ReactNode } from 'react';
 import type { TrackedBet } from './assistant-types';
 import { Ball, Busy, ScoreboardDigits } from './components';
-import { MAX_LEGS, americanLabel, chance, chanceDigits } from './parlay';
+import { MAX_LEGS, americanLabel, chance, chanceDigits, legKey } from './parlay';
 import { LegEditor, focusNearestLeg } from './ParlayLegs';
 import { TrackBetForm } from './TrackBet';
 import { computedLeg } from './useParlay';
@@ -90,11 +90,11 @@ export function SlipDrawer({ parlay, open, onClose, onViewParlay, onTracked, toa
           </div>
         </div>}
         {legs.length ? <ol className="leg-list">
-          {legs.map((leg, index) => <LegEditor key={`${leg.request.player_id}:${leg.request.stat}`} leg={leg} index={index} computed={computedLeg(result, leg, index)} computing={computing}
-            errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onRemove={removeLeg} />)}
+          {legs.map((leg, index) => <LegEditor key={legKey(leg.request)} leg={leg} index={index} computed={computedLeg(result, leg, index)} computing={computing}
+            errors={error?.legs[index]} onSide={parlay.setSide} onLine={parlay.setLine} onTeam={parlay.setTeam} onRemove={removeLeg} />)}
         </ol> : <div className="slip-empty">
           <Ball className="slip-empty-ball" />
-          <p><strong>Your slip is empty.</strong> Run a forecast in Players › Props, then add its Over or Under as a leg.</p>
+          <p><strong>Your slip is empty.</strong> Run a forecast in Players › Props, or open News › Games for moneylines and spreads, then add a leg.</p>
         </div>}
       </div>
       <footer className="slip-footer">

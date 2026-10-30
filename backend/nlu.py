@@ -386,6 +386,24 @@ def parse_leg(text: str, bare_number: bool = False) -> LegSpec:
     return spec
 
 
+MONEYLINE_WORDS = re.compile(r"\b(?:money ?lines?|ml|to win(?: outright)?|straight up|outright|win outright)\b")
+SPREAD_WORDS = re.compile(r"\b(?:spreads?|cover(?:s|ing)?|ats|against the spread|handicap)\b")
+# A point spread is a signed 1-2 digit number ("-5.5", "+3"); American odds have 3 or more digits ("-110", "+150").
+SIGNED_LINE = re.compile(r"(?<![\w.$])([+-])\s?(\d{1,2}(?:\.[05])?)(?![\d.%])|\b(pk|pick ?em|pick'em|pickem)\b")
+
+
+def team_market(text: str) -> tuple[str | None, float | None]:
+    """("moneyline" | "spread" | None, the spread line or None) named in a message about a team."""
+    t = fold(text)
+    found = SIGNED_LINE.search(t)
+    line = None if found is None else 0.0 if found.group(3) else float(found.group(1) + found.group(2))
+    if MONEYLINE_WORDS.search(t) and line is None:
+        return "moneyline", None
+    if line is not None or SPREAD_WORDS.search(t):
+        return "spread", line
+    return None, None
+
+
 INTENTS = [
     ("teach", r"^(?:please\s+)?(?:remember|learn|note)\b.*\b(?:means|is)\b|^\s*when i say\b|\bmeans\b"),
     ("undo", r"^\s*(?:undo|go back|revert|take (?:that|it) back|nevermind|never mind)\b"),
@@ -424,7 +442,7 @@ def split_segments(text: str) -> list[str]:
         if not part.strip():
             continue
         spec = parse_leg(part)
-        if segments and not (spec.stat or spec.side or spec.line is not None):
+        if segments and not (spec.stat or spec.side or spec.line is not None) and team_market(part)[0] is None:
             segments[-1] = f"{segments[-1]} {part}"
         else:
             segments.append(part)

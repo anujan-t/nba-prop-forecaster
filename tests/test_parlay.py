@@ -9,6 +9,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from backend import teams as team_math
 from backend.data import metadata, validate_frame
 from backend.engine import forecast, market_simulation, profit_per_unit
 from backend.parlay import LegNotFound, fair_odds, orthant, price_parlay, tetrachoric, valid_correlation
@@ -49,6 +50,30 @@ def loader(frame: pd.DataFrame):
 def leg(player_id: str, stat: str, line: float, side: str = "over", **extra) -> dict:
     return {"dataset_id": "logs", "player_id": player_id, "stat": stat, "line": line, "side": side, "model": "auto",
             "lookback": 30, "expected_minutes": None, "rest_days": None, "opponent": None, "use_context": False, **extra}
+
+
+def game(game_id: str, team: str, opponent: str, home: bool, market: str = "moneyline", line: float | None = None) -> dict:
+    return {"kind": "game", "game_id": game_id, "date": "2026-10-28", "team": team, "opponent": opponent, "home": home,
+            "market": market, "line": line}
+
+
+class TeamModelStub:
+    """Game legs priced from a fixed home-margin mean per game, plus team margins by date for player-team links."""
+
+    def __init__(self, means: dict[str, float], margins: dict[str, dict[str, float]] | None = None):
+        self.means, self.margins = means, margins or {}
+
+    def leg(self, request: dict) -> dict:
+        pmf = team_math.margin_pmf(self.means[request["game_id"]])
+        wins, pushes = team_math.leg_outcomes(request)
+        probability = float(pmf[wins].sum())
+        return {"kind": "game", "game_id": request["game_id"], "date": str(request["date"]), "team": request["team"],
+                "opponent": request["opponent"], "home": request["home"], "market": request["market"], "line": request.get("line"),
+                "probability": probability, "push": float(pmf[pushes].sum()), "fair_odds": fair_odds(probability),
+                "early_season": False, "warnings": [], "pmf": pmf}
+
+    def team_margins(self, team: str) -> dict[str, float]:
+        return self.margins.get(team, {})
 
 
 class OddsAndProbabilityTests(unittest.TestCase):
@@ -202,6 +227,88 @@ class ParlayTests(unittest.TestCase):
         first, second = self.price(legs), self.price(legs)
         self.assertEqual(first["probability"], second["probability"])
         self.assertLessEqual(first["probability"], min(leg["probability"] for leg in first["legs"]))
+
+
+class GameLegTests(unittest.TestCase):
+    """Moneylines and spreads in a parlay, priced by the team model, alone and next to props."""
+
+    def setUp(self):
+        self.frame = season()
+        self.load = loader(self.frame)
+        rng = np.random.default_rng(5)
+        center = self.frame[self.frame["player_id"] == "center"]
+        # DEN wins by more when its center scores more, so his points and the DEN margin move together.
+        margins = {str(day): float(2 * (points - center["points"].mean()) + 3 * rng.normal())
+                   for day, points in zip(center["date"], center["points"])}
+        self.model = TeamModelStub({"1": 4.0, "2": -1.5, "9": 2.0}, {"DEN": margins})
+
+    def price(self, legs: list[dict]) -> dict:
+        return price_parlay(legs, None, self.load, team_model=self.model)
+
+    def test_game_legs_on_different_games_are_independent(self):
+        result = self.price([game("1", "DEN", "LAL", True), game("2", "BOS", "NYK", False, "spread", 3.5)])
+        first, second = result["legs"]
+        self.assertEqual((first["kind"], first["team"], second["market"], second["line"]), ("game", "DEN", "spread", 3.5))
+        self.assertAlmostEqual(result["probability"], first["probability"] * second["probability"])
+        self.assertEqual(result["pairs"][0]["basis"], "independent")
+        self.assertIn("Moneyline and spread legs come from COURTSIDE's team ratings", " ".join(result["warnings"]))
+        self.assertIn("team model", result["method"])
+
+    def test_same_game_legs_are_priced_exactly(self):
+        pmf = team_math.margin_pmf(4.0)
+        nested = self.price([game("1", "DEN", "LAL", True), game("1", "DEN", "LAL", True, "spread", -6.5)])
+        self.assertAlmostEqual(nested["probability"], pmf[team_math.MARGINS >= 7].sum(), places=6)
+        self.assertEqual((nested["pairs"][0]["basis"], nested["pairs"][0]["source"]), ("same_game", "model"))
+        self.assertGreater(nested["pairs"][0]["effect"], 0)
+        middle = self.price([game("1", "DEN", "LAL", True), game("1", "LAL", "DEN", False, "spread", 6.5)])
+        self.assertAlmostEqual(middle["probability"], pmf[(team_math.MARGINS > 0) & (team_math.MARGINS < 6.5)].sum(), places=6)
+
+    def test_contradictory_or_repeated_game_legs_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "already a moneyline on this game"):
+            self.price([game("1", "DEN", "LAL", True), game("1", "LAL", "DEN", False)])
+        with self.assertRaisesRegex(ValueError, "can't both win"):
+            self.price([game("1", "DEN", "LAL", True), game("1", "LAL", "DEN", False, "spread", -1.5)])
+        with self.assertRaisesRegex(ValueError, "different teams or a different date"):
+            self.price([game("1", "DEN", "LAL", True), game("1", "BOS", "LAL", True, "spread", -1.5)])
+        with self.assertRaisesRegex(ValueError, "team model"):
+            price_parlay([game("1", "DEN", "LAL", True)], None, self.load)
+
+    def test_a_whole_number_spread_can_push(self):
+        pmf = team_math.margin_pmf(4.0)
+        result = self.price([game("1", "DEN", "LAL", True, "spread", -4.0)])
+        self.assertAlmostEqual(result["legs"][0]["push"], pmf[team_math.MARGINS == 4][0])
+        self.assertAlmostEqual(result["no_loss_probability"], pmf[team_math.MARGINS >= 4].sum(), places=6)
+
+    def test_a_players_leg_moves_with_his_teams_game_leg(self):
+        over = self.price([leg("center", "points", 25.5), game("9", "DEN", "LAL", True)])
+        pair = over["pairs"][0]
+        self.assertEqual((pair["basis"], pair["source"]), ("team_player", "history"))
+        self.assertGreater(pair["rank_correlation"], 0.5)
+        self.assertGreater(over["probability"], over["independent_probability"])
+        self.assertIn("the DEN margin", pair["note"])
+        under = self.price([leg("center", "points", 25.5, "under"), game("9", "DEN", "LAL", True)])
+        self.assertLess(under["probability"], under["independent_probability"])
+        opponent = self.price([leg("center", "points", 25.5), game("9", "LAL", "DEN", False)])
+        self.assertLess(opponent["probability"], opponent["independent_probability"])
+        elsewhere = self.price([leg("wing", "points", 26.5), game("9", "DEN", "LAL", True)])
+        self.assertEqual(elsewhere["pairs"][0]["basis"], "independent")
+        self.assertAlmostEqual(elsewhere["probability"], elsewhere["independent_probability"])
+
+    def test_calibration_leaves_game_legs_alone(self):
+        class Calibrator:
+            def calibrate_over(self, p, stat=None):
+                return min(0.99, p + 0.05)
+
+            def calibration_status(self):
+                return {"samples": 900}
+
+        result = price_parlay([leg("wing", "points", 26.5), game("2", "BOS", "NYK", False)], None, self.load,
+                              calibrator=Calibrator(), team_model=self.model)
+        self.assertAlmostEqual(result["calibration"]["legs"][1], result["legs"][1]["probability"])
+        self.assertNotAlmostEqual(result["calibration"]["legs"][0], result["legs"][0]["probability"])
+        self.assertIn("keep the team model's chance", result["calibration"]["note"])
+        self.assertIsNone(price_parlay([game("2", "BOS", "NYK", False)], None, self.load, calibrator=Calibrator(),
+                                       team_model=self.model)["calibration"])
 
 
 class ParlayApiTests(unittest.TestCase):

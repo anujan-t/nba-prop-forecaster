@@ -246,10 +246,37 @@ LINE MOVEMENT
   Manual timestamped snapshots only, separated by dataset/player/stat/game
   date/book. No sportsbook scraping, paid API or automatic wagering.
 
+MONEYLINES AND SPREADS (TEAM MODEL)
+  News > Games shows, under each scheduled game's lines, the team model's
+  chance for each team to win and to cover the listed spread, the book's
+  break-even ("needs", vig included) and buttons that add the moneyline or
+  spread to the parlay slip. Coach does the same by chat.
+  The model (backend/teams.py) rates every team from every completed game
+  this season and last (NBA Stats LeagueGameLog, cached):
+    - home margin = home court + home rating - away rating
+                    - back-to-back penalty for a team that played the day
+                      before, fitted by weighted ridge regression
+    - weights halve every 120 days; last season's games count 0.3 as much
+    - the margin is Normal(model margin, 13 points) on whole points with no
+      ties (overtime), which gives moneylines, spreads, pushes on whole-
+      number spreads, and exact joint chances for legs on the same game
+    - back-to-backs come from the schedule (the team plays the day before)
+  Walk-forward check (each game predicted only from earlier games; shown by
+  GET /api/games/model): 2023-24 to 2025-26, 3,680 games, log loss 0.602
+  vs 0.689 for always picking the home team, 66.7% of winners, calibrated
+  by decile; home court came out near 2 points, a back-to-back near 2.5.
+  Closing sportsbook lines typically score about 0.58-0.59, so treat big
+  disagreements with the book with suspicion.
+  Limitations: no injury, lineup or trade adjustment (the injury report is
+  shown alongside); until both teams have played 10 games the ratings lean
+  on last season; totals are not modeled. Research only.
+
 PARLAY BUILDER
-  Combine 1-10 legs (player, market, line, over/under). Each player+market
-  pair may appear once. Each leg uses exactly the Props view model and
-  settings.
+  Combine 1-10 legs: player props (player, market, line, over/under) and
+  game legs (a team's moneyline or point spread). Each player+market pair
+  may appear once, and each game may have one moneyline and one spread.
+  Each prop leg uses exactly the Props view model and settings; game legs
+  use the team model above.
   Same-player legs on the game simulator are priced jointly: the chance
   that they all win is the share of the same simulated games in which they
   all win (exact under the model). Each such pair also reports the latent
@@ -269,6 +296,12 @@ PARLAY BUILDER
       blocks).
   Players on different current teams are treated as independent, even if
   they meet in the same game (head-to-head linkage is not modelled).
+  Game legs on the same game are priced exactly from that game's margin
+  distribution (e.g. a team's moneyline and its -6.5 both win only when it
+  wins by 7+); legs that cannot both win are rejected. A player's prop and
+  a moneyline or spread in his game are linked through the rank correlation
+  between his stat and his team's final margin in his recent games (same
+  shrinkage). Game legs on different games are independent.
   A push counts as not winning. When a whole-number line can push, the
   no-loss probability (every leg wins or pushes) is shown separately, and
   the expected return against entered parlay odds treats a push as a loss.
@@ -284,10 +317,13 @@ COURTSIDE COACH (CHAT)
     Build:    "add Jokic over 26.5 points and Murray 21+ points",
               "add Jokic over 45.5 PRA", "Curry over 4.5 threes",
               "Gobert over 2.5 steals + blocks", "add Jokic double-double",
+              "add Celtics -5.5", "add the Nuggets moneyline", "I want to
+              bet on the Cavaliers moneyline too",
               "remove leg 2", "flip the Murray leg", "change leg 1 line to
               27.5", "make it the under", "undo", "clear my slip"
     Price:    "what are my odds?", "book has it at +450, good price?",
-              "Jokic over 26.5 at -115?" (odds: +450, -120, 5.5x, 9/2, evens)
+              "Jokic over 26.5 at -115?" (odds: +450, -120, 5.5x, 9/2, evens),
+              "who wins Lakers vs Celtics?", "is Knicks +3.5 a good bet?"
     Research: "what's SGA averaging?", "how often has Wemby gone over 3.5
               blocks in his last 10 games?", "why are my legs linked?",
               "how old is Wemby?", "tell me about Luka"
@@ -391,18 +427,26 @@ PROJECT STATUS
     POST /api/parlay
       {legs:[{dataset_id, player_id, stat, line, side:"over"|"under",
               model, lookback, expected_minutes, rest_days, opponent,
-              use_context}], book_odds: American odds or null,
+              use_context}
+             or {kind:"game", game_id (ESPN event id), date, team, opponent,
+              home, market:"moneyline"|"spread", line (spread only, the
+              team's line, e.g. -5.5)}], book_odds: American odds or null,
        simulations: optional}
+    GET /api/games/model (team ratings, home court, back-to-back penalty,
+      and the walk-forward check on last season)
     GET /api/datasets (also lists the markets and simulation choices)
     GET /api/news/headlines | /injuries | /transactions | /coaches
     GET /api/news/teams?season=current|previous, GET /api/news/teams/{abbr}
     GET /api/news/players/{id} (injury status, teammates listed, headlines)
-    GET /api/news/games?day=YYYY-MM-DD (schedule, scores, game lines and the
-      injuries of the teams playing; default today, US Eastern)
+    GET /api/news/games?day=YYYY-MM-DD (schedule, scores, game lines, the
+      team model's view of each scheduled game and the injuries of the
+      teams playing; default today, US Eastern)
       Each accepts refresh=true to bypass the cache.
     POST /api/assistant/chat {message, conversation_id, slip, focus}
     POST /api/assistant/feedback, GET /api/assistant/status
     GET|POST /api/ledger, POST /api/ledger/settle, DELETE /api/ledger/{id}
+      (props are graded from box scores the day after; moneylines and
+      spreads from the final score as soon as the game is final)
     GET /api/learning, POST /api/learning/retrain,
     DELETE /api/learning/aliases/{phrase}
   Profiles and careers have independent source/fetched-at metadata.
@@ -412,6 +456,7 @@ PROJECT STATUS
   research studies. This batch limit is NOT a limit on player access.
   /api/datasets/nba is a deprecated compatibility alias.
   Future work: injury-aware minutes and usage (teammate on/off splits),
+  injury and lineup adjustments for the team model, game totals,
   opponent pace and defense adjustments from the team style data, licensed
   historical odds, prospective real-data evaluation and deployment.
   Source repository: https://github.com/anujan-t/nba-prop-forecaster

@@ -123,8 +123,9 @@ def short_date(value: str | None) -> str | None:
 
 class Desk:
     def __init__(self, newsroom: Any, roster: Callable[[], list[dict]], profile: Callable[[str], dict] | None = None,
-                 today: Callable[[], date] | None = None, learning: Any = None):
+                 today: Callable[[], date] | None = None, learning: Any = None, games: Any = None):
         self.newsroom, self.roster, self.profile, self.learning = newsroom, roster, profile, learning
+        self.games = games
         self.today = today or (lambda: newsroom.today() if newsroom is not None else date.today())
 
     # ------------------------------------------------------------------ helpers
@@ -196,10 +197,19 @@ class Desk:
 
     @staticmethod
     def compact_game(game: dict) -> dict:
-        return {key: game.get(key) for key in ("id", "start", "tipoff", "state", "detail", "home", "away", "odds", "broadcast", "note", "date")}
+        return {key: game.get(key) for key in ("id", "start", "tipoff", "state", "detail", "home", "away", "odds", "broadcast", "note", "date", "model")}
+
+    def with_model(self, game: dict) -> dict:
+        """The game with the team model's view attached when it is still to be played (best-effort)."""
+        if self.games is None or game.get("state") != "pre" or game.get("model") is not None:
+            return game
+        try:
+            return {**game, "model": self.games.annotate(game)}
+        except Exception:  # noqa: BLE001 - cards still show the game and its lines without the model
+            return game
 
     def games_card(self, title: str, day: date, games: list[dict]) -> dict:
-        return {"type": "games", "title": title, "date": day.isoformat(), "games": [self.compact_game(game) for game in games],
+        return {"type": "games", "title": title, "date": day.isoformat(), "games": [self.compact_game(self.with_model(game)) for game in games],
                 "route": "#/news/games"}
 
     # ------------------------------------------------------------------ dispatcher
@@ -462,7 +472,8 @@ class Desk:
             turn.say("- " + self.game_line(game, show_day=False))
         if lines and not any(game.get("odds") for game in games):
             turn.say("No lines are posted for these games yet; books usually post them a day or two ahead.")
-        turn.say("_Game lines are the sportsbook ESPN lists, for reference; the model prices player props, not game sides._" if lines else "")
+        turn.say("_Lines are the sportsbook ESPN lists. Ask about any game, e.g. **who wins Lakers vs Celtics?**, for the team model's "
+                 "moneyline and spread chances._" if lines else "")
         turn.cards.append(self.games_card(f"Games {when}" if when in ("tonight", "tomorrow", "last night") else f"Games on {when}", day, games))
         turn.suggest("Who's out tonight?" if day == self.today() else "", "What's the spread for the first game?" if not lines else "", "Latest NBA news")
         return True
@@ -595,10 +606,38 @@ class Desk:
                 parts.append(f"total **{odds['total']:g}**")
             role = "favored" if odds.get("favorite") == code else "the underdog" if odds.get("favorite") else "even"
             turn.say(f"The **{self.nickname(code)}** are {role} {self.game_phrase(game, code)}: " + ", ".join(parts) + f" ({odds.get('provider') or 'listed book'}).")
-            turn.say("_Game lines are shown for reference. COURTSIDE's model prices player props, not sides or totals._")
+        view = self.model_line(game, code)
+        if view:
+            turn.say(view)
+        turn.say("_The team model rates moneylines and spreads from every game this season and last; it doesn't adjust for "
+                 "injuries, and totals aren't modeled._" if view else "_Game lines are the sportsbook ESPN lists, for reference._")
         turn.cards.append(self.games_card("Game lines", game_day(game) or self.today(), [game]))
-        turn.suggest(f"{self.nickname(code)} injuries", "What are the lines tonight?")
+        nick = self.nickname(code)
+        turn.suggest(f"Add {nick} moneyline" if view else "", f"{nick} injuries", "What are the lines tonight?")
         return True
+
+    def model_line(self, game: dict, code: str) -> str | None:
+        """The team model's view of one side of a scheduled game, or None when it can't be priced."""
+        if self.games is None or game.get("state") != "pre":
+            return None
+        try:
+            model = self.games.annotate(game)
+        except Exception:  # noqa: BLE001 - the model view is an extra; the lines answer stands without it
+            return None
+        mine = "home" if game["home"]["team"] == code else "away"
+        nick = self.nickname(code)
+        text = (f"COURTSIDE's team model: **{nick} {model[mine + '_win']:.0%}** to win, model line {nick} "
+                f"{line_text(model['fair_spread'][mine])}")
+        spread = model["markets"]["spread"].get(mine)
+        if spread:
+            text += f"; covers {line_text(spread['line'])} {spread['probability']:.0%}"
+        book = model["markets"]["moneyline"][mine].get("book")
+        if book:
+            text += f"; the {odds_text(book['odds'])} moneyline needs {book['implied']:.0%}"
+        text += "."
+        if model.get("early_season"):
+            text += " Early season: the ratings still lean on last season, so treat big gaps with the book with suspicion."
+        return text
 
     # ------------------------------------------------------------------ news and moves
     def data_headlines(self, team: str | None = None, player: dict | None = None, kind: str | None = None, query: str | None = None, limit: int = 6) -> dict:
