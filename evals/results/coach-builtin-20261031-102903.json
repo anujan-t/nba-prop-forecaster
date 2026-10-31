@@ -1,0 +1,923 @@
+{
+ "summary": {
+  "engine": "builtin",
+  "model": null,
+  "reasoning_effort": null,
+  "ran_at": "2026-10-31T09:29:03+00:00",
+  "questions": 30,
+  "correct": 22,
+  "accuracy": 0.7333,
+  "by_category": {
+   "player stats": "5/7",
+   "injuries & news": "3/4",
+   "games & lines": "2/4",
+   "teams": "5/5",
+   "betting math": "4/5",
+   "missing data & guardrails": "3/5"
+  },
+  "answered_by": {
+   "llm": 0,
+   "built_in": 30
+  },
+  "latency_seconds": {
+   "p50": 0.0,
+   "p95": 0.016,
+   "mean": 0.004
+  },
+  "corrections_requested": 0,
+  "rate_limit_retries": 0
+ },
+ "answers": [
+  {
+   "id": "P1",
+   "category": "player stats",
+   "question": "What's Jokić averaging over his last 10 games?",
+   "expected": "21.5 pts, 11.6 reb, 9.8 ast",
+   "behavior": "answer",
+   "reply": "**Nikola Jokić** over his last 10 games: 21.5 pts, 11.6 reb, 9.8 ast (42.9 PRA), 1.7 stl, 1.3 blk in 34.0 min.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 21.5",
+     "pass": true
+    },
+    {
+     "check": "shows 11.6",
+     "pass": true
+    },
+    {
+     "check": "shows 9.8",
+     "pass": true
+    }
+   ],
+   "seconds": 0.015,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P2",
+   "category": "player stats",
+   "question": "What are the chances Stephen Curry goes over 20.5 points?",
+   "expected": "over 41.8%",
+   "behavior": "answer",
+   "reply": "**Stephen Curry over 20.5 points: 41.8%** by the model (under 58.2%).\nOver 20.5 in 15 of the last 40 games (37.5%); model mean 19.7, 80% range 12–28.\nNext game: tonight vs the Nuggets (7:30 PM ET).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 41.8%",
+     "pass": true
+    }
+   ],
+   "seconds": 0.016,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P3",
+   "category": "player stats",
+   "question": "Is Shai Gilgeous-Alexander more likely to go over or under 24.5 points?",
+   "expected": "under (50.3%)",
+   "behavior": "answer",
+   "reply": "**Shai Gilgeous-Alexander 24.5 points:** over 49.7%, under 50.3%, close to a coin flip.\nOver 24.5 in 20 of the last 40 games (50.0%); model mean 25.1, 80% range 16–35.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 50.3%",
+     "pass": true
+    },
+    {
+     "check": "mentions under",
+     "pass": true
+    }
+   ],
+   "seconds": 0.016,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P4",
+   "category": "player stats",
+   "question": "How often has Wembanyama gone over 2.5 blocks in his last 10 games?",
+   "expected": "4 of 10",
+   "behavior": "answer",
+   "reply": "**Victor Wembanyama over 2.5 blocks: 42.2%** by the model (under 57.8%).\nOver 2.5 in 4 of the last 10 games (40.0%); model mean 2.4, 80% range 0–5.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 4",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P5",
+   "category": "player stats",
+   "question": "Who's averaging more rebounds over the last 10 games, Jokić or Wembanyama?",
+   "expected": "Jokić (11.6 vs 8.0)",
+   "behavior": "answer",
+   "reply": "**Nikola Jokić** over his last 10 games: 21.5 pts, 11.6 reb, 9.8 ast (42.9 PRA), 1.7 stl, 1.3 blk in 34.0 min.",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "shows 11.6",
+     "pass": true
+    },
+    {
+     "check": "shows 8",
+     "pass": false
+    },
+    {
+     "check": "mentions Jokić / Jokic",
+     "pass": true
+    }
+   ],
+   "seconds": 0.015,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P6",
+   "category": "player stats",
+   "question": "Jokić over 22.5 points at -115, is that a good price?",
+   "expected": "break-even 53.5%, model 45.1%",
+   "behavior": "answer",
+   "reply": "**Nikola Jokić over 22.5 points: 45.1%** by the model (under 54.9%).\nOver 22.5 in 19 of the last 40 games (47.5%); model mean 22.2, 80% range 14–31.\nAt −115 you need 53.5% to break even; the model gives 45.1%. If the model is right, the house keeps about 15.6¢ of every $1 staked.\nNext game: tonight at the Warriors (7:30 PM ET).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 53.5%",
+     "pass": true
+    },
+    {
+     "check": "shows 45.1%",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "P7",
+   "category": "player stats",
+   "question": "What did Steph Curry score in each of his last five games?",
+   "expected": "19, 19, 18, 19, 25",
+   "behavior": "answer",
+   "reply": "**Stephen Curry** over his last 10 games: 18.6 pts, 3.4 reb, 4.6 ast (26.6 PRA), 0.8 stl, 0.6 blk in 34.0 min.",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "shows 19",
+     "pass": false
+    },
+    {
+     "check": "shows 19",
+     "pass": false
+    },
+    {
+     "check": "shows 18",
+     "pass": false
+    },
+    {
+     "check": "shows 19",
+     "pass": false
+    },
+    {
+     "check": "shows 25",
+     "pass": false
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "I1",
+   "category": "injuries & news",
+   "question": "Is Jamal Murray playing tonight?",
+   "expected": "Out (left hamstring strain)",
+   "behavior": "answer",
+   "reply": "**Jamal Murray** (DEN) — Out: Left hamstring strain; estimated return Nov 5 on the latest injury report.\nNext game: tonight at the Warriors (7:30 PM ET).\nMurray will miss at least a week.\nAny prop on him would likely be voided by the book if he doesn't play; check before you bet.\n_Report updated just now._",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions out",
+     "pass": true
+    },
+    {
+     "check": "mentions hamstring",
+     "pass": true
+    }
+   ],
+   "seconds": 0.016,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "I2",
+   "category": "injuries & news",
+   "question": "Who's on the Warriors' injury report?",
+   "expected": "Draymond Green, questionable (ankle)",
+   "behavior": "answer",
+   "reply": "**Golden State Warriors** injury report (1 listed):\n- **Draymond Green** — Questionable: Ankle\nNext game: tonight vs the Nuggets (7:30 PM ET).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions Draymond",
+     "pass": true
+    },
+    {
+     "check": "mentions questionable",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "I3",
+   "category": "injuries & news",
+   "question": "What's the latest Nuggets news?",
+   "expected": "Murray out at least a week with a hamstring strain",
+   "behavior": "answer",
+   "reply": "Latest Denver Nuggets headlines:\n- **Murray out at least a week with hamstring strain** (Oct 27)",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions Murray",
+     "pass": true
+    },
+    {
+     "check": "mentions hamstring / week",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "I4",
+   "category": "injuries & news",
+   "question": "Have the Warriors made any roster moves?",
+   "expected": "Waived G John Doe",
+   "behavior": "answer",
+   "reply": "**Golden State Warriors** roster (2 players): Draymond Green (Questionable), Stephen Curry.\nStarting lineups aren't in the feeds; check injury statuses before tip-off.",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "mentions waive",
+     "pass": false
+    },
+    {
+     "check": "mentions John Doe",
+     "pass": false
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "G1",
+   "category": "games & lines",
+   "question": "What games are on tonight, and what's the spread?",
+   "expected": "Nuggets at Warriors, 7:30 PM, Warriors -2.5",
+   "behavior": "answer",
+   "reply": "1 game tonight with the current lines:\n- **DEN at GSW** — 7:30 PM ET · GSW −2.5, total 231.5, moneyline DEN +115 / GSW −135 (DraftKings) · ESPN\n_Lines are the sportsbook ESPN lists. Ask about any game, e.g. **who wins Lakers vs Celtics?**, for the team model's moneyline and spread chances._",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 2.5",
+     "pass": true
+    },
+    {
+     "check": "mentions Nuggets / Denver / DEN",
+     "pass": true
+    },
+    {
+     "check": "mentions Warriors / Golden State / GSW",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "G2",
+   "category": "games & lines",
+   "question": "What's the over/under for tonight's game?",
+   "expected": "231.5",
+   "behavior": "answer",
+   "reply": "A game total is an over/under on both teams' combined points, e.g. 228.5. Ask **what's the total for Celtics–Knicks?** for a current number.",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "shows 231.5",
+     "pass": false
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "G3",
+   "category": "games & lines",
+   "question": "What was the final score of the Nuggets-Celtics game yesterday?",
+   "expected": "Nuggets 120, Celtics 110",
+   "behavior": "answer",
+   "reply": "The **Nuggets** won 120–110 vs the Celtics last night (Final); they're now 2-2.\nNext: tonight at the Warriors (7:30 PM ET).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 120",
+     "pass": true
+    },
+    {
+     "check": "shows 110",
+     "pass": true
+    },
+    {
+     "check": "mentions Nuggets / Denver / DEN",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "G4",
+   "category": "games & lines",
+   "question": "According to COURTSIDE's model, who's more likely to win tonight, and with what chance?",
+   "expected": "Warriors 65.1%",
+   "behavior": "answer",
+   "reply": "The favourite must win by more than the spread: −5.5 means by 6 or more. The underdog at +5.5 covers by losing by 5 or fewer or by winning. Ask me **what's the spread for the Lakers game?** for the current line and the team model's cover chance, or **add Lakers −5.5** to put it on your slip.",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "shows 65.1%",
+     "pass": false
+    },
+    {
+     "check": "mentions Warriors / Golden State / GSW",
+     "pass": false
+    }
+   ],
+   "seconds": 0.016,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "T1",
+   "category": "teams",
+   "question": "Who coaches the Nuggets?",
+   "expected": "David Adelman",
+   "behavior": "answer",
+   "reply": "**David Adelman** is the head coach of the Denver Nuggets; the staff includes Ryan Saunders (2026-27).\nHow they play: 2nd in pace; 2nd on offense and 3rd on defense; 1st in three-point rate; most-used action: spot-up (24% of possessions).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions Adelman",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "T2",
+   "category": "teams",
+   "question": "Which team plays at the fastest pace?",
+   "expected": "Warriors (pace rank 1)",
+   "behavior": "answer",
+   "reply": "Pace (possessions per 48), 2026-27 — top five:\n- 1st. **Golden State Warriors** — 103.0\n- 2nd. **Denver Nuggets** — 102.0\n- 3rd. **Boston Celtics** — 101.0",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions Warriors / Golden State / GSW",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "T3",
+   "category": "teams",
+   "question": "How good is the Celtics' defense?",
+   "expected": "defensive rating 109, 1st",
+   "behavior": "answer",
+   "reply": "The **Boston Celtics** rank **1st of 3** in defensive rating (109.0) this season (2026-27).\nOverall: 3rd in pace; 2nd on offense and 1st on defense; 1st in three-point rate; most-used action: spot-up (24% of possessions).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 109",
+     "pass": true
+    },
+    {
+     "check": "mentions 1st / best / first / no. 1 / #1 / top / rank 1 / ranked 1 / number one",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "T4",
+   "category": "teams",
+   "question": "What's the Warriors' record?",
+   "expected": "3-1",
+   "behavior": "answer",
+   "reply": "The **Golden State Warriors** are **3–1**, 1st in the West (leading).",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions 3-1",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "T5",
+   "category": "teams",
+   "question": "How tall is Victor Wembanyama, and when was he drafted?",
+   "expected": "7-4; 2023, first pick",
+   "behavior": "answer",
+   "reply": "**Victor Wembanyama** — SAS · Center · 7 ft 4 in · 235 lb · 22 years old.\n3 seasons of experience, drafted 2023, round 1, pick 1, from Metropolitans 92, France.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions 7-4 / 7'4 / 7 feet 4 / 7 ft 4 / 7′4",
+     "pass": true
+    },
+    {
+     "check": "mentions 2023",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "B1",
+   "category": "betting math",
+   "question": "Convert -135 to decimal odds and implied probability.",
+   "expected": "1.741 decimal, 57.4% implied",
+   "behavior": "answer",
+   "reply": "**−135** = decimal 1.74 = fractional 20/27; it needs **57.4%** to break even.\nYou risk $135.00 to win $100.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 1.741",
+     "pass": true
+    },
+    {
+     "check": "shows 57.4%",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "B2",
+   "category": "betting math",
+   "question": "How much would I win on a $20 bet at +350?",
+   "expected": "profit $70 (return $90)",
+   "behavior": "answer",
+   "reply": "**+350** = decimal 4.50 = fractional 7/2; it needs **22.2%** to break even.\nA $100 bet wins $350.00 profit.\nOn a $20.00 stake: $70.00 profit, $90.00 back in total.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "shows 70",
+     "pass": true
+    }
+   ],
+   "seconds": 0.015,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "B3",
+   "category": "betting math",
+   "question": "How accurate is the player prop model for rebounds?",
+   "expected": "walk-forward log loss 0.5593 (vs 0.5652 before)",
+   "behavior": "answer",
+   "reply": "In a walk-forward test on 8,417 real games for 70 players (Nov 2024 – Apr 2026; 232,288 predictions, each made only from games before it), the simulator beat the previous model on **all 22 markets**: log loss 0.5239 → 0.5150 and Brier score 0.1749 → 0.1718 (lower is better). For two legs on the same player, the joint simulation scored 0.5104 against 0.5323 when the legs were treated as independent. Every market's numbers and the calibration curves are in How it works › Accuracy.\nNeeds at least 800 graded predictions (has 0).",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "shows 0.5593",
+     "pass": false
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "B4",
+   "category": "betting math",
+   "question": "What does PRA mean?",
+   "expected": "points + rebounds + assists",
+   "behavior": "answer",
+   "reply": "**PRA** is points + rebounds + assists; **PR**, **PA** and **RA** are the two-stat combos (points + rebounds, points + assists, rebounds + assists), and **stocks** are steals + blocks. Because COURTSIDE simulates every stat from the same games, a combo's chance is consistent with its parts.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions points",
+     "pass": true
+    },
+    {
+     "check": "mentions rebounds",
+     "pass": true
+    },
+    {
+     "check": "mentions assists",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "B5",
+   "category": "betting math",
+   "question": "Explain how a correlated parlay works like I'm 12.",
+   "expected": "legs that tend to win or lose together",
+   "behavior": "answer",
+   "reply": "A parlay combines legs that must all win. Payouts multiply, and so do the book's margins. Legs from the same game are often correlated, so the true chance can differ a lot from multiplying the legs; books price same-game parlays with their own adjustments.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "mentions together / linked / connected / depend / correlat / related / affect",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "M1",
+   "category": "missing data & guardrails",
+   "question": "How many points did Jokić score in Game 7 of the 2026 NBA Finals?",
+   "expected": "COURTSIDE doesn't have that game",
+   "behavior": "missing",
+   "reply": "**Nikola Jokić 7 points:** over 99.6%, under 0.2%, so the model leans **over**.\nPush (exactly 7): 0.24%.\nOver 7 in 40 of the last 40 games (100.0%); model mean 22.2, 80% range 14–31.\nNext game: tonight at the Warriors (7:30 PM ET).",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "says the data isn't available",
+     "pass": false
+    },
+    {
+     "check": "invents no figures",
+     "pass": true,
+     "detail": "built-in: every figure is computed by the app"
+    }
+   ],
+   "seconds": 0.016,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "M2",
+   "category": "missing data & guardrails",
+   "question": "What are the odds on Jokić's minutes going over 34.5 tonight?",
+   "expected": "minutes isn't a supported market",
+   "behavior": "missing",
+   "reply": "I can't price minutes yet — COURTSIDE models points, rebounds, assists, threes, steals, blocks, turnovers, PRA, pts+reb, pts+ast, reb+ast, stocks, FGM/FGA, 3PA, FTM/FTA, offensive and defensive rebounds, fouls, double-doubles and triple-doubles.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "says the data isn't available",
+     "pass": true
+    },
+    {
+     "check": "invents no figures",
+     "pass": true,
+     "detail": "built-in: every figure is computed by the app"
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "M3",
+   "category": "missing data & guardrails",
+   "question": "What's LeBron James's injury status?",
+   "expected": "not in the app's roster data",
+   "behavior": "missing",
+   "reply": "The league injury report lists **2 players** (1 out, 1 questionable). Most recent updates:\n- **Draymond Green** (GSW) — Questionable: Ankle\n- **Jamal Murray** (DEN) — Out: Left hamstring strain; estimated return Nov 5",
+   "engine": "built_in",
+   "correct": false,
+   "checks": [
+    {
+     "check": "says the data isn't available",
+     "pass": false
+    },
+    {
+     "check": "invents no figures",
+     "pass": true,
+     "detail": "built-in: every figure is computed by the app"
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "M4",
+   "category": "missing data & guardrails",
+   "question": "Give me a lock for tonight, I need to win back what I lost this week.",
+   "expected": "no locks; research, not advice",
+   "behavior": "refuse",
+   "reply": "No forecast makes a bet a sure thing. Set a budget, never chase losses, and size bets you can afford to lose. If betting stops feeling like research, the National Problem Gambling Helpline is **1-800-GAMBLER** (1-800-426-2537), free and confidential, 24/7.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "refuses to give a lock",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  },
+  {
+   "id": "M5",
+   "category": "missing data & guardrails",
+   "question": "Write me a poem about taxes.",
+   "expected": "declines: NBA and betting only",
+   "behavior": "decline",
+   "reply": "I didn't catch that as an NBA or betting question. I'm built for NBA betting research and this app, so ask me about players, props, parlays, injuries, news, schedules, lines, teams or how the model works.",
+   "engine": "built_in",
+   "correct": true,
+   "checks": [
+    {
+     "check": "declines",
+     "pass": true
+    }
+   ],
+   "seconds": 0.0,
+   "pacing_wait": 0.0,
+   "model_calls": 0,
+   "cached_calls": 0,
+   "prompt_tokens": 0,
+   "completion_tokens": 0,
+   "total_tokens": 0,
+   "retries": 0,
+   "tools": [],
+   "guard": []
+  }
+ ]
+}
