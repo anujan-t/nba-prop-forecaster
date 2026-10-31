@@ -2,8 +2,10 @@
 
 Slip commands, props, league questions (news, injuries, games and lines, teams, coaches, standings), betting math and
 questions about the app are handled by a deterministic parser wired to the same code as the UI. An optional
-OpenAI-compatible model answers everything except slip commands, but it can only obtain facts by calling the tools
-defined here, so every probability, price, headline and injury it reports comes from the app's own models and feeds.
+OpenAI-compatible model (Google Gemini, OpenAI, a local Ollama ...) answers free-form questions, but it can only obtain
+facts by calling the tools defined here, and every number in its answer is checked against what the tools returned.
+A model that runs on another computer only ever sees the question, public NBA data and the app's computed numbers:
+questions about the user's slip, bets or record are answered by the built-in coach on this computer.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from datetime import date, datetime, timezone
 import json
 import math
 import re
+import time
 from typing import Any
 import uuid
 from zoneinfo import ZoneInfo
@@ -21,7 +24,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from . import nlu, topics
+from . import grounding, nlu, topics
 from . import news
 from .desk import METRIC_KEYS, Desk, injury_what
 from .engine import american_probability, forecast, profit_per_unit
@@ -53,6 +56,25 @@ SLIP_QUESTION = re.compile(r"\b(?:my|our|the|this|these) (?:slip|parlay|legs?|ti
                            r"\b(?:does|will|can|would) (?:it|this|they|that|these) (?:hit|cash|win)\b|\bwhat are (?:my|the) odds\b")
 THANKS = re.compile(r"(?:(?:ok(?:ay)?|cool|nice|great|awesome|perfect|got it|sounds good|appreciate it|cheers|thx|ty|thanks?(?: you)?"
                     r"(?: so much| a lot)?)[\s!.,]*)+(?:coach)?[\s!.]*")
+# Questions about the user's own slip, bets, record or what Coach has learned from them: a model on another computer
+# never sees these; the built-in coach answers them here.
+PRIVATE_TOPIC = re.compile(
+    r"\b(?:my|our)\b(?:\s+\w+){0,2}?\s+(?:slip|parlay|parlays|legs?|ticket|tickets|bets?|wagers?|odds|chances?|picks?|record|"
+    r"results|history|stakes?|bankroll|money|winnings|profit|roi)\b|\b(?:the|this|these|that) (?:slip|parlay|legs?|ticket)\b|"
+    r"\bleg\s*#?\d+\b|\ball (?:\d+|the|my) legs\b|\b(?:does|will|can|would) (?:it|this|they|that|these) (?:hit|cash|win)\b|"
+    r"\bwhat are my odds\b")
+PRIVATE_INTENTS = {"track", "settle", "undo", "clear", "teach", "forget"}
+# Odds said about the slip ("book has it at +450", "fanduel's paying +255 for this") rather than a conversion question.
+SLIP_PRICE = re.compile(r"\b(?:book|books|sportsbook|fanduel|draftkings|it|this|that|they|parlay|slip|ticket|price|priced|paying|pays|"
+                        r"offer\w*|has|have|got|getting|gives?)\b")
+SLIP_TOOLS = {"get_slip", "add_leg", "remove_leg", "update_leg", "set_book_odds", "clear_slip", "price_slip"}
+PRIVATE_TOOLS = SLIP_TOOLS | {"track_record", "learning_status"}
+# A message leaning on the previous turn's player or team ("is he playing?", "what's their record?").
+REFERS_BACK = re.compile(r"\b(?:he|him|his|he's|hes|himself|they|them|their|theirs|they're)\b")
+LLM_ROUNDS = 7
+CORRECTION = ("Your answer used numbers that are not in the tool results or the question: {numbers}. Rewrite it using only "
+              "numbers from the tool results above (rounding is fine), calling another tool if you need one, or say plainly "
+              "that COURTSIDE doesn't have that data.")
 # Markets a bare line ("over 23.5?") can mean, and intents that never continue a conversation about one player's prop.
 INFERABLE_STATS = ("points", "rebounds", "assists", "threes", "pts_reb_ast", "pts_reb", "pts_ast", "reb_ast", "steals", "blocks")
 STANDALONE_INTENTS = {"teach", "forget", "undo", "clear", "help", "greet", "track", "settle", "learning", "remove", "update", "parlay"}
@@ -67,6 +89,13 @@ EARLY_CHAT = "_Early season: the ratings still lean on last season, so treat big
 def strip_vocative(text: str) -> str:
     """ "Coach, who's out tonight?" -> "who's out tonight?" (the bot's name isn't a question about coaches)."""
     return re.sub(r"^\s*(?:(?:hey|hi|yo|ok|okay)\s+)?coach\b[,:!]?\s*", "", text, flags=re.I) or text
+
+
+def private_turn(record: dict) -> bool:
+    """Whether a past turn's players, teams and lines must stay on this computer. Only a turn the language model itself
+    answered, without touching the slip, may lend them to the next question: anything answered here (a slip command, a
+    question about the slip or bets, a fallback) or that changed, tracked or described a slip leg stays here."""
+    return bool(record.get("actions")) or "leg" in (record.get("entities") or {}) or record.get("engine") != "llm"
 
 
 def eastern_today() -> date:
@@ -249,6 +278,9 @@ class Turn:
     engine: str = "built_in"
     priced: dict | None = None
     llm_tried: bool = False
+    request: str | None = None  # the follow-up rewrite of an elliptical message ("over or under 23.5?" -> a full question)
+    context_private: bool = False  # the previous turn's players, teams and lines stay on this computer (see private_turn)
+    llm_usage: dict = field(default_factory=dict)
 
     def say(self, text: str) -> None:
         if text and text not in self.lines:
@@ -285,12 +317,19 @@ class Coach:
             return {"mode": "built_in", "model": None, "endpoint": None, "ready": True,
                     "detail": ("Built-in coach: answers slip commands, props, parlays, news, injuries, schedules, game lines, teams, "
                                "coaches, standings, betting math and questions about the app on this computer, using the app's own "
-                               "models and feeds. To add a language model for free-form conversation, set COURTSIDE_LLM_MODEL (plus "
-                               "COURTSIDE_LLM_API_KEY / COURTSIDE_LLM_BASE_URL for OpenAI, Anthropic, OpenRouter, Azure OpenAI or a "
-                               "local Ollama/LM Studio server) in .env and restart.")}
+                               "models and feeds. To add a language model for free-form conversation, set GEMINI_API_KEY for Google "
+                               "Gemini, or COURTSIDE_LLM_MODEL (plus COURTSIDE_LLM_API_KEY / COURTSIDE_LLM_BASE_URL) for OpenAI, "
+                               "Anthropic, OpenRouter, Azure OpenAI or a local Ollama/LM Studio server, and restart.")}
         ready = self.llm_error is None
-        detail = (f"Language model {self.llm.model} at {self.llm.endpoint} handles questions and conversation; slip commands and every "
-                  "number, headline and injury still come from the app's models, feeds and tools.")
+        name = f"Google Gemini ({self.llm.model})" if self.llm.provider == "gemini" else f"Language model {self.llm.model} at {self.llm.endpoint}"
+        detail = (f"{name} answers free-form questions by calling the app's tools; slip commands and every number, headline and "
+                  "injury still come from the app's models, feeds and tools, and any answer with a number the tools didn't return "
+                  "is replaced by the built-in coach's.")
+        if self.llm.local:
+            detail += " The model runs on this computer."
+        else:
+            detail += (" It receives only your question, public NBA data and computed numbers: questions about your slip, bets and "
+                       "record are answered here, and your chat history is never sent.")
         if not ready:
             detail += f" The last call failed ({self.llm_error}); the built-in coach is answering until it recovers."
         return {"mode": "llm", "model": self.llm.model, "endpoint": self.llm.endpoint, "ready": ready, "detail": detail}
@@ -301,6 +340,7 @@ class Coach:
         previous = self.memory.last_turns(conversation_id, 1)
         context = dict(previous[0].get("entities") or {}) if previous else {}
         turn = Turn(conversation_id, message, copy.deepcopy(slip), copy.deepcopy(focus), context)
+        turn.context_private = bool(previous) and private_turn(previous[0])
         slip_before = copy.deepcopy(slip)
         index = nlu.PlayerIndex(self.roster(), self.memory.aliases())
         parsed = nlu.parse(message, self.today())
@@ -322,7 +362,8 @@ class Coach:
         return {
             "turn_id": turn_id, "reply": reply, "slip": turn.slip if turn.changed else None, "actions": turn.actions,
             "cards": turn.cards, "suggestions": turn.suggestions[:4], "clarification": turn.clarification, "learned": turn.learned,
-            "engine": {"mode": turn.engine, "model": self.llm.model if turn.engine == "llm" and self.llm else None},
+            "engine": {"mode": turn.engine, "model": self.llm.model if turn.engine == "llm" and self.llm else None,
+                       "usage": turn.llm_usage or None},
         }
 
     # ------------------------------------------------------------------ routing
@@ -330,6 +371,7 @@ class Coach:
         self.learn_from_clarification(turn, index, previous)
         request = self.follow_up(turn, parsed, index)
         if request:
+            turn.request = request
             parsed = nlu.parse(request, self.today())
             turn.intents = parsed.intents
         names = set(parsed.intents)
@@ -392,7 +434,7 @@ class Coach:
         if teams and self.games is not None and self.game_command(turn, parsed, index, has_spec):
             return
         command = "add" in names and has_spec and bool(mentions)
-        if self.llm is not None and not command and self.llm_turn(turn):
+        if self.llm is not None and not command and self.llm_may_answer(turn, parsed, mentions, teams) and self.llm_turn(turn):
             return
         folded = nlu.fold(text)
         if topics.OTHER_SPORTS.search(folded) and not teams and not mentions:
@@ -464,6 +506,25 @@ class Coach:
                 if team.phrase in mention.phrase.split() or team.phrase == mention.phrase:
                     teams.remove(team)
         return keep
+
+    def llm_may_answer(self, turn: Turn, parsed: nlu.Parsed, mentions: list[nlu.Mention], teams: list[str]) -> bool:
+        """Whether the language model may answer. A model on this computer may answer anything; one on another computer
+        (e.g. Gemini) never gets questions about the user's slip, bets, record or what Coach learned from them."""
+        if self.llm is None or self.llm.local:
+            return True
+        names = set(parsed.intents)
+        folded = nlu.fold(parsed.text)
+        if turn.context_private and (turn.request or turn.context and REFERS_BACK.search(nlu.fold(turn.message))):
+            return False  # "what about the under?" after a slip command or a slip question: it leans on private context
+        if names & PRIVATE_INTENTS or parsed.legs or PRIVATE_TOPIC.search(folded):
+            return False
+        if "learning" in names and not mentions and not teams:
+            return False  # "are you getting smarter?" reports calibration learned partly from graded bets
+        if turn.slip["legs"] and not mentions and not teams and (
+                parsed.odds is not None and SLIP_PRICE.search(folded) or "parlay" in names
+                or "explain" in names and not topics.topics(parsed.text)):
+            return False  # "book has it at +450", "is this parlay any good?", "why are they linked?"
+        return True
 
     def slipish(self, turn: Turn, parsed: nlu.Parsed, mentions: list[nlu.Mention], has_spec: bool, teams: list[str] | None = None) -> bool:
         """Whether a remove/change/clear/track verb is about the slip rather than the league ("did the Lakers cut anyone?")."""
@@ -1411,28 +1472,55 @@ class Coach:
 
     # ------------------------------------------------------------------ language model
     def llm_turn(self, turn: Turn) -> bool:
-        """Lets the configured model answer with tool calls; returns False (built-in fallback) on any failure."""
+        """Lets the configured model answer with tool calls; returns False (built-in fallback) on any failure.
+
+        A model on another computer gets only the question, public NBA data and the app's computed numbers: no slip, bet
+        or tracking tools, no earlier messages (just the players and teams of its own previous answer, see private_turn)
+        and no examples from other conversations. Every number in an answer must round from a number the tools returned or
+        the question contains (dates and times must match dates and times there or today's date); otherwise the model gets
+        one chance to correct itself, then the built-in coach answers.
+        """
         assert self.llm is not None
         if turn.llm_tried:
             return False
         turn.llm_tried = True
+        remote = not self.llm.local
         index = nlu.PlayerIndex(self.roster(), self.memory.aliases())
-        messages = [{"role": "system", "content": self.system_prompt(turn)}]
-        for example in self.memory.examples(turn.message, 3):
-            messages.append({"role": "user", "content": example["message"]})
-            messages.append({"role": "assistant", "content": example["reply"][:600]})
-        for previous in reversed(self.memory.last_turns(turn.conversation_id, 4)):
-            messages.append({"role": "user", "content": previous["message"]})
-            messages.append({"role": "assistant", "content": previous["reply"][:600]})
-        messages.append({"role": "user", "content": turn.message})
+        context = self.prompt_context(turn, remote, index)
+        messages = [{"role": "system", "content": self.prompt_rules(remote) + context}]
+        if not remote:
+            for example in self.memory.examples(turn.message, 3):
+                messages.append({"role": "user", "content": example["message"]})
+                messages.append({"role": "assistant", "content": example["reply"][:600]})
+            for previous in reversed(self.memory.last_turns(turn.conversation_id, 4)):
+                messages.append({"role": "user", "content": previous["message"]})
+                messages.append({"role": "assistant", "content": previous["reply"][:600]})
+        question = turn.message
+        if turn.request and nlu.fold(turn.request) != nlu.fold(turn.message) and not (remote and turn.context_private):
+            question += f"\n(In this conversation that means: {turn.request})"
+        messages.append({"role": "user", "content": question})
+        tools = PUBLIC_TOOLS if remote else TOOLS
+        evidence: list = [context, question]  # the rules' own numbers (rule labels, examples) never vouch for a statistic
+        lines, cards = list(turn.lines), list(turn.cards)
+        started = time.monotonic()
+        corrected = False
         try:
-            for _ in range(6):
-                reply = self.llm.complete(messages, TOOLS)
+            for _ in range(LLM_ROUNDS):
+                reply = self.llm.complete(messages, tools, meter=turn.llm_usage)
                 calls = reply.get("tool_calls") or []
                 if not calls:
                     text = (reply.get("content") or "").strip()
                     if not text:
                         raise LLMError("The language model returned an empty reply.")
+                    missing = grounding.unsupported_numbers(text, grounding.evidence_values(*evidence))
+                    if missing:
+                        turn.tool_calls.append({"name": "llm_unsupported_numbers", "arguments": ", ".join(missing)[:200]})
+                        if corrected:
+                            return self.llm_rejected(turn, lines, cards)
+                        corrected = True
+                        messages.append({"role": "assistant", "content": text})
+                        messages.append({"role": "user", "content": CORRECTION.format(numbers=", ".join(missing[:12]))})
+                        continue
                     turn.lines.append(text[:2000])
                     turn.engine = "llm"
                     self.llm_error = None
@@ -1440,15 +1528,25 @@ class Coach:
                 messages.append({"role": "assistant", "content": reply.get("content") or "", "tool_calls": calls})
                 for call in calls[:6]:
                     name = call.get("function", {}).get("name", "")
+                    said = len(turn.lines)
                     try:
                         arguments = json.loads(call.get("function", {}).get("arguments") or "{}")
                         if not isinstance(arguments, dict):
                             raise ValueError("Tool arguments must be a JSON object.")
+                        if remote and name in PRIVATE_TOOLS:
+                            raise ValueError(f"{name} is not available: the user's slip and bets stay on their computer.")
                         output = self.tool(turn, index, name, arguments)
-                    except (ValueError, KeyError, TypeError, LegNotFound, NewsUnavailableError, NBAUnavailableError) as exc:
+                        if remote:
+                            output = public_output(name, output)
+                    except (ValueError, KeyError, TypeError, LegNotFound, NewsUnavailableError, NBAUnavailableError,
+                            GameModelUnavailable) as exc:
                         output = {"error": str(exc)}
+                    if name not in SLIP_TOOLS:
+                        del turn.lines[said:]  # the model's answer replaces what read-only tools would have said
+                    content = json.dumps(output, default=str)[:6000]
+                    evidence.append(output)  # as an object: field names ("interval_80") and list lengths count too
                     turn.tool_calls.append({"name": name, "arguments": call.get("function", {}).get("arguments", "")[:500]})
-                    messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(output, default=str)[:6000]})
+                    messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": content})
             raise LLMError("The language model did not finish within the tool-call limit.")
         except LLMError as exc:
             self.llm_error = str(exc)
@@ -1457,12 +1555,24 @@ class Coach:
                 turn.engine = "llm"
                 turn.say("The language model stopped mid-answer; the slip changes listed above were applied.")
                 return True
+            turn.lines[:], turn.cards[:] = lines, cards
             return False
+        finally:
+            if turn.llm_usage:
+                turn.llm_usage["seconds"] = round(time.monotonic() - started, 3)
 
-    def system_prompt(self, turn: Turn) -> str:
-        slip = [f"{i + 1}. {describe_leg(leg)}" for i, leg in enumerate(turn.slip["legs"])]
-        focus = turn.focus
-        return (
+    def llm_rejected(self, turn: Turn, lines: list[str], cards: list[dict]) -> bool:
+        """The model's answer still had numbers the tools never returned: the built-in coach answers instead."""
+        if turn.actions:
+            turn.engine = "llm"
+            turn.say("The slip changes listed above were applied.")
+            return True
+        turn.lines[:], turn.cards[:] = lines, cards
+        return False
+
+    def prompt_rules(self, remote: bool = False) -> str:
+        """The fixed instructions. Their own numbers (rule labels, word limits) are not evidence for an answer."""
+        intro = (
             "You are COURTSIDE Coach, the assistant inside COURTSIDE, a local NBA betting research app (player props, plus moneylines "
             "and spreads from a team model). Pages: Players (Props "
             "forecasts, Game log, Career, Lines notebook), Parlay, My Bets, News (Headlines, Injury report, Teams & coaches, Roster "
@@ -1470,19 +1580,55 @@ class Coach:
             "Answer any question about NBA betting, the NBA (news, injuries, schedules, scores, game lines, teams, coaches, playing "
             "styles, standings, rosters, players) or the app, using the tools. "
             "Rules: (1) Every fact and number (probabilities, odds, stats, injuries, headlines, schedules, lines, records) must come "
-            "from a tool result in this conversation; never answer current NBA facts from memory, which may be outdated. If the tools "
-            "have nothing, say so. (2) Use the slip tools only when the user asks to change the parlay, and confirm what changed. "
+            "from a tool result in this conversation; never answer current NBA facts from memory, which may be outdated. Quote numbers "
+            "as the tools give them (rounding is fine; show probabilities as percentages) and never calculate new statistics, averages, "
+            "totals or differences yourself. If a tool returns an error or nothing relevant, say plainly that COURTSIDE doesn't have "
+            "that data, and what it does have. ")
+        slip_rule = ("(2) You cannot see the user's slip, tracked bets or record; for those, tell them to ask \"what are my odds?\" "
+                     "or open My Bets (the built-in coach answers those on their computer). " if remote else
+                     "(2) Use the slip tools only when the user asks to change the parlay, and confirm what changed. ")
+        rules = (
             "(3) This is research, not betting advice: never promise outcomes or give 'locks', never encourage betting, chasing "
             "losses or bigger stakes; if the user seems distressed, mention 1-800-GAMBLER. (4) If a question has nothing to do with "
             "basketball, betting or the app, decline in one sentence and say what you can help with. (5) Supported prop markets: "
             "points, rebounds, assists, threes, steals, blocks, turnovers, PRA and the other combos, stocks, shooting makes and "
             "attempts, offensive and defensive rebounds, fouls, double-doubles and triple-doubles; game moneylines and point spreads "
-            "come from the team model (the user adds those by command, e.g. 'add Celtics -5.5'). (6) Be concise: at most 150 words, "
-            "plain text with **bold** and '- ' bullets only; the app shows cards for tool results, so summarize rather than list everything. "
-            f"Today (US Eastern): {self.today().isoformat()}. Current slip: {('; '.join(slip)) or 'empty'}; book odds: "
-            f"{odds_text(turn.slip.get('book_odds')) if turn.slip.get('book_odds') is not None else 'none'}. "
-            f"Props view focus: {focus['player'] + ' ' + focus['stat'] + ' ' + format(focus['line'], 'g') if focus else 'none'}."
-        )
+            "come from the team model (the games tool's 'model' field; the user adds those by command, e.g. 'add the Celtics spread' "
+            "or 'add the Nuggets moneyline'). (6) Be concise: at most 150 words, plain text with **bold** and '- ' bullets only; the "
+            "app shows cards for tool results, so summarize rather than list everything. ")
+        return intro + slip_rule + rules
+
+    def prompt_context(self, turn: Turn, remote: bool = False, index: nlu.PlayerIndex | None = None) -> str:
+        """The facts of this moment (today, what is being discussed, the slip for a model on this computer), which an answer
+        may quote."""
+        focus = turn.focus
+        context = f"Today (US Eastern): {self.today().isoformat()}. "
+        if remote:
+            context += f"Earlier in this chat: {self.public_context(turn, index)}. "
+        else:
+            slip = [f"{i + 1}. {describe_leg(leg)}" for i, leg in enumerate(turn.slip["legs"])]
+            context += (f"Current slip: {('; '.join(slip)) or 'empty'}; book odds: "
+                        f"{odds_text(turn.slip.get('book_odds')) if turn.slip.get('book_odds') is not None else 'none'}. ")
+        context += f"Props view focus: {focus['player'] + ' ' + focus['stat'] + ' ' + format(focus['line'], 'g') if focus else 'none'}."
+        return context
+
+    def public_context(self, turn: Turn, index: nlu.PlayerIndex | None) -> str:
+        """What the previous answer was about (players, teams, market, line): public NBA entities, never the user's words,
+        and nothing at all unless the model itself gave that answer without touching the slip (see private_turn)."""
+        context = turn.context or {}
+        if turn.context_private or not context:
+            return "nothing yet"
+        parts = []
+        player = (index.players.get(str(context.get("player_id") or "")) if index else None)
+        if player:
+            parts.append(f"{player['name']} ({player.get('team') or 'no team'})")
+        if context.get("team") in topics.TEAM_NAMES:
+            parts.append(self.desk.team_name(context["team"]))
+        if context.get("stat") in nlu.STATS:
+            parts.append(nlu.phrase(context["stat"]))
+        if isinstance(context.get("line"), (int, float)) and not isinstance(context.get("line"), bool):
+            parts.append(f"line {context['line']:g}")
+        return ", ".join(parts) or "nothing yet"
 
     def tool(self, turn: Turn, index: nlu.PlayerIndex, name: str, args: dict) -> dict:
         def player_named(text: str) -> dict:
@@ -1630,11 +1776,20 @@ class Coach:
             return {"players": [{"id": p["id"], "name": p["name"], "team": p["team"]} for p in matches[:8]]}
         if name == "forecast_prop":
             player, stat, line = player_named(args["player"]), stat_of(args["stat"]), line_of(args["line"])
-            result = self.run_forecast(self.leg_request(player, stat, line, "over", turn.focus))
+            window = int(args["games"]) if args.get("games") is not None else 10
+            if not 1 <= window <= 82:
+                raise ValueError("games must be between 1 and 82.")
+            request = self.leg_request(player, stat, line, "over", turn.focus)
+            result = self.run_forecast(request)
             chances = result["probabilities"]
             out = {"player": result["player"]["name"], "stat": stat, "line": line, "over": chances["over"], "under": chances["under"],
                    "push": chances["push"], "mean": result["summary"]["mean"], "interval_80": [result["interval"]["low"], result["interval"]["high"]],
                    "games": result["sample_size"], "model": result["resolved_model"]}
+            frame, _ = self.load(request["dataset_id"])
+            rows = with_stat(frame[frame["player_id"] == player["id"]].sort_values("date"), stat).tail(window)
+            values = rows[stat].astype(int).tolist()
+            out["recent"] = {"games": len(values), "over_line": sum(v > line for v in values), "under_line": sum(v < line for v in values),
+                             "values_oldest_first": values}
             if args.get("odds") is not None:
                 side = side_of(args.get("side") or "over")
                 out["house"] = leg_house(chances[side], chances["under" if side == "over" else "over"], int(args["odds"]))
@@ -1712,8 +1867,10 @@ _DATE = {"type": "string", "description": "today, tomorrow, yesterday, a weekday
 TOOLS = [
     _tool("get_slip", "Current parlay slip legs, book odds and the model's joint probability."),
     _tool("find_player", "Look up current NBA players by name or nickname.", {"name": _PLAYER}, ["name"]),
-    _tool("forecast_prop", "Model probabilities for one player prop; include odds (American) and side to compare a price.",
-          {"player": _PLAYER, "stat": _STAT, "line": _LINE, "side": _SIDE, "odds": {"type": "integer"}}, ["player", "stat", "line"]),
+    _tool("forecast_prop", "Model probabilities for one player prop, plus how often he went over and under the line in his last "
+          "`games` games (default 10); include odds (American) and side to compare a price.",
+          {"player": _PLAYER, "stat": _STAT, "line": _LINE, "side": _SIDE, "odds": {"type": "integer"},
+           "games": {"type": "integer", "description": "Recent games for the hit rate, 1-82 (default 10)"}}, ["player", "stat", "line"]),
     _tool("player_summary", "Recent averages and last five games for a player.", {"player": _PLAYER}, ["player"]),
     _tool("add_leg", "Add a leg to the slip (replaces the same player and stat if present).",
           {"player": _PLAYER, "stat": _STAT, "line": _LINE, "side": _SIDE}, ["player", "stat", "line", "side"]),
@@ -1751,3 +1908,12 @@ TOOLS = [
 ]
 LEAGUE_TOOLS = {"nba_news", "injury_report", "roster_moves", "games", "team_profile", "coaching_staff", "team_rankings", "standings",
                 "team_roster", "player_profile", "site_help", "model_accuracy", "odds_math"}
+# The tools a model on another computer may call: public NBA data and the app's computed numbers, nothing about the user.
+PUBLIC_TOOLS = [tool for tool in TOOLS if tool["function"]["name"] not in PRIVATE_TOOLS]
+
+
+def public_output(name: str, output: dict) -> dict:
+    """A tool result with anything about the user's own bets removed, for a model on another computer."""
+    if name == "model_accuracy" and isinstance(output.get("calibration"), str):
+        return {**output, "calibration": re.sub(r" \([\d,]+ from your tracked legs\)", "", output["calibration"])}
+    return output

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from nba_api.stats.static import teams
 import pandas as pd
 
+import without_llm  # noqa: F401  (first: unit tests never reach a real language model)
 from backend.app import create_app
 from backend.data import demo_frame, validate_frame
 from backend.league import career_seasons, current_season, fetch_profile, fetch_roster, shooting

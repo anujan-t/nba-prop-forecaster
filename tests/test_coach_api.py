@@ -1,4 +1,6 @@
 """API tests for the coach, bet tracker and learning endpoints, with NBA Stats replaced by local fixtures."""
+import json
+import os
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -9,6 +11,7 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
+import without_llm  # noqa: F401  (first: unit tests never reach a real language model)
 from backend.app import create_app
 from backend.data import validate_frame
 
@@ -118,6 +121,29 @@ class CoachApiTests(unittest.TestCase):
                 self.assertEqual(self.client.post("/api/assistant/chat", json=body).status_code, 422)
         empty = self.client.post("/api/ledger", json={"slip": {"legs": [], "book_odds": None}, "stake": None, "event_date": None, "note": None})
         self.assertEqual(empty.status_code, 422)
+
+
+class GeminiConfigurationTests(unittest.TestCase):
+    def test_unit_tests_never_see_a_language_model_setting(self):
+        self.assertEqual(without_llm.llm_settings(), [])
+        with tempfile.TemporaryDirectory() as directory, patch("backend.app.fetch_roster", return_value=ROSTER):
+            self.assertIsNone(create_app(Path(directory)).state.coach.llm)
+
+    def test_a_gemini_key_alone_connects_coach_to_gemini_with_a_cache(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict("os.environ", {"GEMINI_API_KEY": "test-gemini-key-123"}, clear=False), \
+                patch("backend.app.fetch_roster", return_value=ROSTER):
+            for name in ("COURTSIDE_LLM_MODEL", "COURTSIDE_LLM_API_KEY", "COURTSIDE_LLM_BASE_URL", "OPENAI_API_KEY"):
+                os.environ.pop(name, None)
+            app = create_app(Path(directory))
+            status = TestClient(app, base_url="http://127.0.0.1").get("/api/assistant/status").json()
+            coach = app.state.coach
+            self.assertEqual((status["mode"], status["endpoint"], coach.llm.provider), ("llm", "generativelanguage.googleapis.com", "gemini"))
+            self.assertIn("Google Gemini", status["detail"])
+            self.assertIn("never sent", status["detail"])
+            self.assertNotIn("test-gemini-key", json.dumps(status))
+            self.assertIsNotNone(coach.llm.cache)
+            self.assertEqual(coach.llm.cache_ttl, 6 * 3600.0)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
+import without_llm  # noqa: F401  (first: unit tests never reach a real language model)
 from backend.app import create_app
 from backend import teams as team_math
 from backend.data import metadata, validate_frame

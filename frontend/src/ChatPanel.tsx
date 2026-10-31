@@ -64,7 +64,7 @@ export function ChatLauncher({ open, busy, unread, onOpen }: { open: boolean; bu
 
 export function engineLabel(status: AssistantStatus | null, error: string): { text: string; tone: 'checking' | 'built-in' | 'llm' | 'warning' } {
   if (status) {
-    if (status.mode === 'llm') return { text: `LLM · ${status.model ?? 'model'}${status.ready ? '' : ' (offline)'}`, tone: status.ready ? 'llm' : 'warning' };
+    if (status.mode === 'llm') return { text: `${status.endpoint?.includes('googleapis.com') ? 'Gemini' : 'LLM'} · ${status.model ?? 'model'}${status.ready ? '' : ' (offline)'}`, tone: status.ready ? 'llm' : 'warning' };
     return { text: 'Built-in', tone: 'built-in' };
   }
   return error ? { text: 'Status unknown', tone: 'warning' } : { text: 'Checking…', tone: 'checking' };

@@ -191,14 +191,18 @@ ENTRIES: tuple[Entry, ...] = (
           "free-form conversation (Settings › Coach).", "#/coach", "Open Coach"),
     Entry("llm", "Connecting a language model",
           ("language model", "llm", "ai", "gpt", "openai", "chatgpt", "claude", "anthropic", "ollama", "openrouter", "api key",
-           "connect", "smarter chat", "local model"),
-          "I work without one. To add one, put **COURTSIDE_LLM_MODEL** (plus an API key and base URL if needed) in a .env file in "
-          "the app folder and restart: OpenAI, Anthropic, OpenRouter, Azure OpenAI or a local Ollama or LM Studio server all work. "
-          "Every number still comes from the app's own tools.", "#/settings/coach", "Open Settings › Coach"),
+           "connect", "smarter chat", "local model", "gemini", "google"),
+          "I work without one. For Google Gemini, set the environment variable **GEMINI_API_KEY** (optionally "
+          "**COURTSIDE_GEMINI_MODEL**) and restart; for others put **COURTSIDE_LLM_MODEL** (plus an API key and base URL if needed) "
+          "in a .env file in the app folder: OpenAI, Anthropic, OpenRouter, Azure OpenAI or a local Ollama or LM Studio server all "
+          "work. A model on another computer sees only your question, public NBA data and the app's computed numbers, never your "
+          "slip, bets or chat history, and every number in its answers is checked against the app's tools.",
+          "#/settings/coach", "Open Settings › Coach"),
     Entry("privacy", "Privacy",
           ("privacy", "private", "data stored", "stored", "where is my data", "local", "secure", "security", "share"),
           "Your bets, slips, chat history and learned nicknames stay in the app's local runtime folder. Only feed requests leave "
-          "your computer (NBA Stats and ESPN), plus the language model if you connect one."),
+          "your computer (NBA Stats and ESPN), plus, if you connect a language model such as Gemini, your free-form questions with "
+          "the public NBA data and computed numbers needed to answer them. Questions about your slip and bets are answered here."),
     Entry("limits", "What the model doesn't know",
           ("limits", "limitations", "weakness", "doesn't know", "blind spots", "lineups", "blowout", "motivation", "coaching decisions",
            "guarantee", "why was it wrong", "missed"),

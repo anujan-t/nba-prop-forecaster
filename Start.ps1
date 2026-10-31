@@ -28,6 +28,15 @@ foreach ($envFile in $envFiles) {
         }
     }
 }
+# Gemini settings saved as Windows user environment variables count even if this terminal opened before they were set.
+if ($env:OS -eq "Windows_NT") {
+    foreach ($name in "GEMINI_API_KEY", "COURTSIDE_GEMINI_MODEL") {
+        if (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
+            $value = [Environment]::GetEnvironmentVariable($name, "User")
+            if ($value) { [Environment]::SetEnvironmentVariable($name, $value, "Process") }
+        }
+    }
+}
 Write-Host "Courtside: http://127.0.0.1:$Port"
 Write-Host "Local research app. Press Ctrl+C to stop."
 & $Python -m uvicorn backend.app:app --host 127.0.0.1 --port $Port

@@ -377,11 +377,20 @@ class HouseMathTests(unittest.TestCase):
         self.assertIn("excluding pushes", house["note"])
 
 
-def fake_llm(responses: list[dict], seen: list[dict]):
+def fake_llm(responses: list[dict], seen: list[dict], base_url: str = "http://127.0.0.1:11434/v1"):
+    """A scripted model. The default URL is on this computer (full slip tools); pass Gemini's URL for a remote model."""
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": responses.pop(0)}]})
-    return LLMClient("https://llm.example/v1", "test-model", "sk-test", transport=httpx.MockTransport(handler))
+        return httpx.Response(200, json={"choices": [{"message": responses.pop(0)}],
+                                         "usage": {"prompt_tokens": 900, "completion_tokens": 40, "total_tokens": 940}})
+    return LLMClient(base_url, "test-model", "sk-test", transport=httpx.MockTransport(handler))
+
+
+GEMINI = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def call(name: str, arguments: dict, call_id: str = "1") -> dict:
+    return {"content": None, "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
 class LanguageModelTests(CoachTestCase):
@@ -394,7 +403,8 @@ class LanguageModelTests(CoachTestCase):
             {"content": "Added **Jokić over 11.5 rebounds**; the slip is priced above."},
         ], seen)
         response = self.say("build me something with the joker on the glass")
-        self.assertEqual(response["engine"], {"mode": "llm", "model": "test-model"})
+        self.assertEqual((response["engine"]["mode"], response["engine"]["model"]), ("llm", "test-model"))
+        self.assertEqual(response["engine"]["usage"]["calls"], 3)
         self.assertEqual(self.legs(), [("Nikola Jokić", "rebounds", "over", 11.5)])
         self.assertIn("priced above", response["reply"])
         self.assertTrue(any(card["type"] == "parlay" for card in response["cards"]))
@@ -459,6 +469,140 @@ class LanguageModelTests(CoachTestCase):
             denied.complete([], [])
         self.assertIn("HTTP 401 (invalid_api_key)", str(raised.exception))
         self.assertNotIn("sk-", str(raised.exception))
+
+
+class RemoteModelTests(CoachTestCase):
+    """A model on another computer (Gemini) sees only the question, public NBA data and computed numbers."""
+
+    def test_the_slip_bets_and_earlier_messages_are_never_sent(self):
+        self.say("add jokic over 31.5 points")
+        self.slip["book_odds"] = 450
+        seen = []
+        self.coach.llm = fake_llm([call("odds_math", {"odds": -135}), {"content": "−135 is **1.74** in decimal (**57.4%** implied)."}], seen, GEMINI)
+        response = self.say("convert -135 to decimal odds for me")
+        self.assertEqual(response["engine"]["mode"], "llm")
+        self.assertEqual(response["engine"]["usage"]["calls"], 2)
+        self.assertEqual(response["engine"]["usage"]["prompt_tokens"], 1800)
+        sent = json.dumps(seen)
+        for private in ("add jokic", "31.5", "450", "Current slip", "book odds:"):
+            self.assertNotIn(private, sent)
+        names = {tool["function"]["name"] for tool in seen[0]["tools"]}
+        self.assertFalse(names & {"get_slip", "add_leg", "price_slip", "set_book_odds", "track_record", "learning_status"})
+        self.assertIn("Earlier in this chat: nothing yet", seen[0]["messages"][0]["content"])  # the last turn changed the slip
+        self.assertEqual([m["role"] for m in seen[0]["messages"]], ["system", "user"])
+
+    def test_slip_bet_and_learning_questions_stay_on_this_computer(self):
+        self.say("add jokic over 26.5 points and jamal murray over 20.5 points")
+        seen = []
+        self.coach.llm = fake_llm([], seen, GEMINI)
+        for message in ("what are my odds?", "book has it at +450, is that good?", "why are my legs linked", "remove leg 2",
+                        "is this parlay any good?", "grade my bets", "how am i doing", "are you getting smarter?", "undo"):
+            with self.subTest(message=message):
+                self.assertEqual(self.say(message)["engine"]["mode"], "built_in")
+        self.assertEqual(seen, [])
+
+    def test_a_model_that_calls_a_private_tool_is_refused(self):
+        self.say("add jokic over 31.5 points")
+        seen = []
+        self.coach.llm = fake_llm([call("get_slip", {}), {"content": "I can't see your slip; ask **what are my odds?**"}], seen, GEMINI)
+        response = self.say("tell me about my homework")
+        self.assertEqual(response["engine"]["mode"], "llm")
+        tool_reply = json.loads(seen[1]["messages"][-1]["content"])
+        self.assertIn("not available", tool_reply["error"])
+        self.assertNotIn("31.5", json.dumps(seen))
+
+    def test_invented_numbers_get_one_correction(self):
+        seen = []
+        self.coach.llm = fake_llm([{"content": "That's 1.80 in decimal."}, call("odds_math", {"odds": -135}),
+                                   {"content": "−135 is **1.74** in decimal, **57.4%** implied."}], seen, GEMINI)
+        response = self.say("convert -135 to decimal odds for me")
+        self.assertEqual((response["engine"]["mode"], response["reply"]), ("llm", "−135 is **1.74** in decimal, **57.4%** implied."))
+        self.assertIn("1.80", seen[1]["messages"][-1]["content"])
+        self.assertIn("not in the tool results", seen[1]["messages"][-1]["content"])
+
+    def test_numbers_still_invented_after_the_correction_fall_back_to_the_built_in_coach(self):
+        seen = []
+        self.coach.llm = fake_llm([{"content": "SGA averages 41.7 points."}, {"content": "Still 41.7 points a night."}], seen, GEMINI)
+        response = self.say("what's SGA averaging lately")
+        self.assertEqual(response["engine"]["mode"], "built_in")
+        self.assertNotIn("41.7", response["reply"])
+        self.assertTrue(any(card["type"] == "player" for card in response["cards"]))
+        self.assertEqual(response["engine"]["usage"]["calls"], 2)  # the attempt is still counted
+        turn = self.learning.turns[-1]
+        self.assertIn("llm_unsupported_numbers", [item["name"] for item in turn["tool_calls"]])
+
+    def test_follow_ups_get_the_player_not_the_earlier_message(self):
+        seen = []
+        self.coach.llm = fake_llm([call("player_summary", {"player": "SGA"}), {"content": "Here's his recent form."},
+                                   {"content": "COURTSIDE doesn't have home/road splits in chat yet; the Players page shows them."}], seen, GEMINI)
+        self.assertEqual(self.say("what's SGA averaging")["engine"]["mode"], "llm")
+        self.assertEqual(self.say("how does he play on the road?")["engine"]["mode"], "llm")
+        system = seen[2]["messages"][0]["content"]
+        self.assertIn("Earlier in this chat: Shai Gilgeous-Alexander (OKC)", system)
+        self.assertNotIn("averaging", json.dumps(seen[2]["messages"][1:]))
+
+    def test_follow_ups_to_slip_turns_and_private_answers_stay_on_this_computer(self):
+        seen = []
+        self.coach.llm = fake_llm([{"content": "The Warriors play at the fastest pace in the league."}], seen, GEMINI)
+        self.say("add jamal murray over 20.5 points")
+        self.assertEqual(self.say("what about the under?")["engine"]["mode"], "built_in")  # rewritten from the slip leg
+        self.say("add jamal murray over 20.5 points")  # already on the slip: nothing changes, but the reply describes leg 1
+        self.assertEqual(self.say("is he playing tonight?")["engine"]["mode"], "built_in")
+        self.say("is leg 1 a good bet?")
+        response = self.say("which team plays the fastest?")  # stands on its own: the model answers, without that context
+        self.assertEqual(response["engine"]["mode"], "llm")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("Earlier in this chat: nothing yet", seen[0]["messages"][0]["content"])
+        sent = json.dumps(seen)
+        for private in ("20.5", "Murray", "leg 1", "In this conversation"):
+            self.assertNotIn(private, sent)
+
+    def test_tool_numbers_count_with_their_field_names(self):
+        out = self.coach.tool(self.coach_turn(), self.index(), "forecast_prop", {"player": "Victor Wembanyama", "stat": "blocks", "line": 2.5})
+        low, high = out["interval_80"]
+        reply = (f"His model mean is **{out['mean']:.1f}** blocks with an 80% range of {low:g}-{high:g}, and he went over 2.5 in "
+                 f"{out['recent']['over_line']} of his last {out['recent']['games']}.")
+        seen = []
+        self.coach.llm = fake_llm([call("forecast_prop", {"player": "Victor Wembanyama", "stat": "blocks", "line": 2.5}), {"content": reply}],
+                                  seen, GEMINI)
+        response = self.say("how's wemby looking for blocks against 2.5?")
+        self.assertEqual((response["engine"]["mode"], response["reply"]), ("llm", reply))
+        self.assertEqual(len(seen), 2)  # no correction round
+
+    def test_numbers_in_the_instructions_or_todays_date_do_not_vouch_for_statistics(self):
+        cases = [("give me a quick read on wemby", "Wembanyama is averaging 4 blocks, 6 assists and 3 threes, and blocked 5 in each of his last 2."),
+                 ("how many points is jokic putting up lately", f"Jokić is scoring {self.coach.today().day} points a night.")]
+        for number, (message, invented) in enumerate(cases):
+            with self.subTest(message=message):
+                seen = []
+                self.coach.llm = fake_llm([{"content": invented}, {"content": invented}], seen, GEMINI)
+                response = self.say(message, conversation=f"invented-{number}")
+                self.assertEqual(response["engine"]["mode"], "built_in")
+                self.assertIn("not in the tool results", seen[1]["messages"][-1]["content"])
+                self.assertNotIn(invented, response["reply"])
+
+    def test_read_only_tools_do_not_add_their_own_text(self):
+        seen = []
+        self.coach.llm = fake_llm([call("player_summary", {"player": "SGA"}), {"content": "Here's his recent form."}], seen, GEMINI)
+        response = self.say("give me a quick read on shai's recent form")
+        self.assertEqual(response["reply"], "Here's his recent form.")
+        self.assertTrue(any(card["type"] == "player" for card in response["cards"]))
+
+    def test_forecast_tool_reports_the_recent_hit_rate_from_the_game_log(self):
+        out = self.coach.tool(self.coach_turn(), self.index(), "forecast_prop",
+                              {"player": "Victor Wembanyama", "stat": "blocks", "line": 2.5, "games": 10})
+        blocks = self.frames["1641705"].sort_values("date")["blocks"].tail(10).astype(int).tolist()
+        self.assertEqual(out["recent"], {"games": 10, "over_line": sum(v > 2.5 for v in blocks), "under_line": sum(v < 2.5 for v in blocks),
+                                         "values_oldest_first": blocks})
+        with self.assertRaises(ValueError):
+            self.coach.tool(self.coach_turn(), self.index(), "forecast_prop", {"player": "Victor Wembanyama", "stat": "blocks", "line": 2.5, "games": 0})
+
+    def coach_turn(self):
+        from backend.assistant import Turn
+        return Turn("tool-test", "", {"legs": [], "book_odds": None}, None, {})
+
+    def index(self):
+        return nlu.PlayerIndex(PLAYERS, {})
 
 
 if __name__ == "__main__":

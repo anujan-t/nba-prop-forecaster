@@ -422,8 +422,32 @@ class Desk:
     def data_games(self, day: date, team: str | None = None) -> dict:
         board = self.newsroom.scoreboard(day)
         games = [game for game in board["games"] if team is None or team in (game["home"]["team"], game["away"]["team"])]
-        return {"date": day.isoformat(), "games": [self.compact_game(game) for game in games], "stale": board.get("stale"),
-                "fetched_at": board.get("fetched_at")}
+        return {"date": day.isoformat(), "games": [{**self.compact_game(game), "model": self.model_view(game)} for game in games],
+                "stale": board.get("stale"), "fetched_at": board.get("fetched_at")}
+
+    def model_view(self, game: dict) -> dict | None:
+        """The team model's view of a scheduled game, compact enough for a language model's tool result."""
+        annotated = self.with_model(game).get("model")
+        if not annotated:
+            return None
+        teams = {"home": game["home"]["team"], "away": game["away"]["team"]}
+        view = {"win_chance": {teams[side]: round(annotated[f"{side}_win"], 4) for side in teams},
+                "fair_spread": {teams[side]: annotated["fair_spread"][side] for side in teams},
+                "expected_margin": {teams["home"]: round(annotated["home_margin"], 1)},
+                "back_to_back": [teams[side] for side in teams if annotated.get(f"{side}_b2b")],
+                "early_season": annotated.get("early_season")}
+        markets = annotated.get("markets") or {}
+        for market in ("moneyline", "spread"):
+            sides = {}
+            for side, quote in (markets.get(market) or {}).items():
+                book = quote.get("book") or {}
+                sides[teams[side]] = {key: value for key, value in (
+                    ("line", quote.get("line")), ("model_chance", round(quote["probability"], 4)), ("push", round(quote.get("push") or 0, 4)),
+                    ("book_odds", book.get("odds")), ("book_break_even", book.get("implied") and round(book["implied"], 4)),
+                    ("model_minus_break_even", book.get("edge") and round(book["edge"], 4))) if value is not None}
+            if sides:
+                view[market] = sides
+        return view
 
     def next_slate(self, start: date, days: int = 7) -> tuple[date, list[dict]]:
         for offset in range(days + 1):

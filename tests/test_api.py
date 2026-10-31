@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import pandas as pd
 from requests.exceptions import Timeout
 
+import without_llm  # noqa: F401  (first: unit tests never reach a real language model)
 from backend.app import create_app
 from backend.data import Store, demo_frame, metadata, read_csv, validate_frame
 from backend.nba import NBAUnavailableError, import_game_logs

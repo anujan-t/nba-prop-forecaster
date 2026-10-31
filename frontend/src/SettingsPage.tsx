@@ -44,6 +44,7 @@ export function AppearanceSettings({ theme, onTheme }: { theme: Theme; onTheme: 
 }
 
 const llmOptions: { title: string; note?: string; lines: string[] }[] = [
+  { title: 'Google Gemini', note: 'Free tier at aistudio.google.com/apikey. Best set as a Windows user environment variable rather than in .env. Google may use free-tier prompts to improve its products; Coach sends only your question, public NBA data and computed numbers.', lines: ['GEMINI_API_KEY=<your key>', 'COURTSIDE_GEMINI_MODEL=gemini-3.8-flash   (optional)'] },
   { title: 'OpenAI', lines: ['COURTSIDE_LLM_MODEL=gpt-4o-mini', 'COURTSIDE_LLM_API_KEY=sk-...'] },
   { title: 'Anthropic', note: 'Uses Anthropic’s OpenAI-compatible endpoint. Pick a model id from Anthropic’s model list.', lines: ['COURTSIDE_LLM_MODEL=<claude-model-id>', 'COURTSIDE_LLM_BASE_URL=https://api.anthropic.com/v1', 'COURTSIDE_LLM_API_KEY=sk-ant-...'] },
   { title: 'OpenRouter', note: 'One key, many models (openrouter.ai/models).', lines: ['COURTSIDE_LLM_MODEL=openai/gpt-4o-mini', 'COURTSIDE_LLM_BASE_URL=https://openrouter.ai/api/v1', 'COURTSIDE_LLM_API_KEY=sk-or-...'] },
@@ -103,8 +104,8 @@ export function CoachSettings({ chat, learning, onOpenCoach }: { chat: ChatState
       </div>
       <h3 className="settings-subtitle"><KeyRound size={17} aria-hidden="true" />{status?.mode === 'llm' ? 'Change the language model' : 'Connect a language model (optional)'}</h3>
       <ol className="llm-steps">
-        <li>Copy <code>.env.example</code> in the COURTSIDE folder to <code>.env</code>. It stays on this computer and out of git.</li>
-        <li>Fill in one option with <code>COURTSIDE_LLM_MODEL</code>, plus <code>COURTSIDE_LLM_API_KEY</code> and <code>COURTSIDE_LLM_BASE_URL</code> where needed:
+        <li>For Google Gemini, add <code>GEMINI_API_KEY</code> as a Windows user environment variable (Start › “Edit environment variables for your account”). For the others, copy <code>.env.example</code> in the COURTSIDE folder to <code>.env</code>; it stays on this computer and out of git.</li>
+        <li>Fill in one option:
           <div className="llm-options">{llmOptions.map(option => <div key={option.title} className="llm-option">
             <strong>{option.title}</strong>
             {option.note && <small>{option.note}</small>}
@@ -113,7 +114,7 @@ export function CoachSettings({ chat, learning, onOpenCoach }: { chat: ChatState
         </li>
         <li>Restart COURTSIDE with <code>Start.ps1</code>, then press <strong>Check again</strong>.</li>
       </ol>
-      <p className="record-hint">A language model is optional. It adds free-form conversation on top of the built-in coach, and it can only get facts by calling the app’s tools, so every number still comes from COURTSIDE. If the model can’t be reached, the built-in coach answers instead.</p>
+      <p className="record-hint">A language model is optional. It adds free-form conversation on top of the built-in coach and can only get facts by calling the app’s tools; an answer with any number the tools didn’t return is replaced by the built-in coach’s. A model on another computer never sees your slip, bets or chat history: those questions are answered here. If the model can’t be reached, the built-in coach answers instead.</p>
     </section>
     <section className="card settings-card" aria-labelledby="coach-memory-title">
       <SectionHeading id="coach-memory-title" eyebrow="MEMORY" title="What Coach remembers" headingRef={memoryHeading} />

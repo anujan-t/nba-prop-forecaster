@@ -26,7 +26,7 @@ from .parlay import MAX_LEGS, LegNotFound, price_parlay
 from .assistant import Coach
 from .learning import Learning
 from .newsroom import Newsroom
-from .llm import LLMClient
+from .llm import LLMClient, StoreCache
 from .stats import PROP_STATS, catalog, label as stat_label, validate_line as validate_market_line
 from .teams import MAX_SPREAD, GameModel, GameModelUnavailable
 
@@ -390,6 +390,9 @@ def create_app(data_dir: Path | None = None, background: bool = False) -> FastAP
     except ValueError as exc:
         language_model = None
         logging.getLogger("courtside").warning("Language model disabled: %s", exc)
+    if language_model is not None:
+        # Identical requests (same question, same tool results) reuse the saved answer for six hours: fewer free-tier calls.
+        language_model.cache, language_model.cache_ttl = StoreCache(store), 6 * 3600.0
     def roster_players() -> list[dict]:
         try:
             return roster_or_saved()["players"]

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+import without_llm  # noqa: F401  (first: unit tests never reach a real language model)
 from backend import news
 from backend.app import create_app
 
