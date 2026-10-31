@@ -118,6 +118,30 @@ and frontend/package-lock.json.
 
 MODEL / API TESTS
   .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+  The tests never call Gemini or any other model (it is mocked). An
+  optional live check makes a few real Gemini calls with your key:
+    $env:COURTSIDE_LIVE_TESTS = "1"
+    .\.venv\Scripts\python.exe -m unittest tests.test_gemini_live -v
+
+COACH EVALUATION
+  evals/coach_eval.py asks Coach 30 questions with known answers: player
+  stats and forecasts (7), injuries and news (4), games and lines (4),
+  teams (5), betting math and model accuracy (5), and missing data and
+  guardrails (5: data the app doesn't have, a request for a "lock", an
+  off-topic request). The league is fixed and fictional (the test fixtures,
+  with player averages unlike the real players'), so an answer from a
+  model's memory instead of the app's tools is marked wrong. Expected
+  answers are computed by the app's own functions. A reply passes when it
+  states the expected numbers (at the precision shown) and terms, or the
+  expected behavior (says the data is missing, refuses, declines).
+    .\.venv\Scripts\python.exe -m evals.coach_eval --engine builtin
+    .\.venv\Scripts\python.exe -m evals.coach_eval --engine gemini --rpm 8 --price-in 0.75 --price-out 3.75
+  It reports accuracy by category, which engine answered, latency (p50 and
+  p95, excluding the pacing waits), tokens and cost per answer, and saves
+  every answer to evals/results/. Cost is $0 on Gemini's free tier;
+  --price-in/--price-out (USD per million input/output tokens, thinking
+  counted as output) give the paid list-price equivalent. The built-in
+  coach alone answers 22 of 30.
 
 DEVELOPMENT / LEGACY CLI (OPTIONAL, NOT THE APPLICATION'S DATA SOURCE)
   .\.venv\Scripts\python.exe -m backend.cli demo --output data\sample_games.csv
@@ -367,16 +391,41 @@ COURTSIDE COACH (CHAT)
   odds it assumes -110 on every leg priced as independent, and says so.
   Single props refund pushes, so their comparison is conditional on settling.
 
-  Optional language model: set COURTSIDE_LLM_MODEL (plus
-  COURTSIDE_LLM_API_KEY and/or COURTSIDE_LLM_BASE_URL) in a git-ignored
-  .env file; see .env.example (OpenAI, Anthropic, OpenRouter, Azure OpenAI
-  v1, local Ollama or LM Studio). Slip commands still run through the
-  built-in parser; every other message goes to the model, which can only get
-  facts by calling the app's tools (forecasts, slip edits and pricing, track
-  record, news, injuries, roster moves, games and lines, team profiles,
-  coaching staffs, rankings, standings, rosters, player bios, app help, model
-  accuracy and odds math). Any failure falls back to the built-in coach for
-  that message. Keys are never logged or returned.
+  Optional language model: Google Gemini or any OpenAI-compatible model.
+  Gemini: set GEMINI_API_KEY (a key from aistudio.google.com/apikey) as a
+  Windows user environment variable or in a git-ignored .env file; the
+  model is gemini-3.8-flash unless COURTSIDE_GEMINI_MODEL names another.
+  The app reaches Gemini through Google's OpenAI-compatible endpoint, so one
+  client serves every provider. Others: set COURTSIDE_LLM_MODEL (plus
+  COURTSIDE_LLM_API_KEY and/or COURTSIDE_LLM_BASE_URL); see .env.example
+  (OpenAI, Anthropic, OpenRouter, Azure OpenAI v1, local Ollama or LM
+  Studio). Slip commands still run through the built-in parser; every other
+  message goes to the model, which can only get facts by calling the app's
+  tools (forecasts with recent hit rates, slip edits and pricing, track
+  record, news, injuries, roster moves, games and lines with the team
+  model's view, team profiles, coaching staffs, rankings, standings,
+  rosters, player bios, app help, model accuracy and odds math). Any
+  failure falls back to the built-in coach for that message. Keys are never
+  logged or returned.
+  Privacy: a model on another computer (Gemini, OpenAI, ...) receives only
+  the question, public NBA data and the app's computed numbers. Questions
+  about your slip, bets, record, learning or memory, and follow-ups to them
+  or to slip commands, are answered by the built-in coach on this computer;
+  the remote model cannot call the slip, track-record or learning tools and
+  never sees your slip, book odds, chat history or liked replies. For a
+  follow-up it gets only the players and teams of its own previous answer.
+  Google may use free-tier Gemini prompts to improve its products, which is
+  why nothing private is sent. A local model (Ollama, LM Studio) keeps every
+  tool, the slip, recent messages and liked replies.
+  Grounding: every number in a model's reply must match (after rounding) a
+  number in the tool results or the question, and every date or clock time
+  a date or time there (or today's date). A reply with an unsupported figure
+  is sent back once for correction; if it still has one, the built-in coach
+  answers instead.
+  Rate limits and cost: 429/503 replies are retried after the provider's
+  suggested wait, COURTSIDE_LLM_RPM paces calls under a free-tier limit and
+  identical requests are reused from a 6-hour cache. Each reply reports its
+  model calls, tokens and seconds (engine.usage in the chat response).
 
 GETTING SMARTER OVER TIME
   1. My Bets: tracked bets are graded from NBA box scores the day after
@@ -397,7 +446,8 @@ GETTING SMARTER OVER TIME
      new games are imported or bets are graded; a calibration learned on an
      older model version is never applied (it is rebuilt).
   3. Memory: learned nicknames, and thumbs up/down on replies; liked replies
-     become examples for the language model.
+     become examples for a local language model (never sent to a remote
+     one).
 
 PROJECT STATUS
   Implemented: synthetic pipeline; models; game simulator; 22 markets
@@ -410,7 +460,9 @@ PROJECT STATUS
   automatic grading; calibration learned from results; newsroom (headlines,
   injury report, roster moves, coaching staffs, team playing styles, games
   with betting lines); chat coach that answers league, game, betting and app
-  questions.
+  questions; optional Gemini (or other) language model for the coach with
+  private questions kept on this computer, number grounding, rate-limit
+  handling and a 30-question evaluation.
   Primary endpoints:
     GET /api/nba/roster
     GET /api/nba/players?search=<name> (all current matches, no result cap)
